@@ -1,0 +1,36 @@
+MacWine
+Copyright (C) 2026 Miroslav Navrátil
+
+MacWine's own code (scripts, patches, tools and the macOS app) is licensed under the
+GNU Lesser General Public License, version 2.1 - see LICENSE.
+
+MacWine builds and bundles, or downloads on first use, the following third-party software.
+Each component keeps its own license:
+
+Bundled in the runtime (built from source by the scripts in this repository)
+  Wine                 LGPL-2.1-or-later   https://www.winehq.org
+                       Built from the Wine source archive published by CodeWeavers
+                       (https://www.codeweavers.com/crossover/source), with MacWine's own patches.
+  DXVK                 zlib                https://github.com/doitsujin/dxvk
+  MoltenVK             Apache-2.0          https://github.com/KhronosGroup/MoltenVK
+  SPIRV-Cross          Apache-2.0          https://github.com/KhronosGroup/SPIRV-Cross
+  FreeType             FTL / GPL-2.0       https://freetype.org
+  GnuTLS               LGPL-2.1-or-later   https://gnutls.org
+  Nettle, GMP          LGPL-3.0 / GPL-2.0  https://www.lysator.liu.se/~nisse/nettle/, https://gmplib.org
+  cabextract           GPL-3.0             https://www.cabextract.org.uk
+  mingw-w64            ZPL / public domain https://www.mingw-w64.org
+
+Linked into the app
+  Sparkle              MIT                 https://sparkle-project.org
+
+Downloaded on first use (pinned version, checksum verified, not redistributed by MacWine)
+  Legendary            GPL-3.0             https://github.com/legendary-gl/legendary
+  gogdl                GPL-3.0             https://github.com/Heroic-Games-Launcher/heroic-gogdl
+  winetricks           LGPL-2.1-or-later   https://github.com/Winetricks/winetricks
+
+Not included
+  MacWine does not include or redistribute Apple's D3DMetal / Game Porting Toolkit; users import
+  their own copy. Store launchers (Steam, Ubisoft Connect, ...) are downloaded from their vendors.
+
+Steam, Epic Games, GOG, Ubisoft and all game names are trademarks of their respective owners.
+MacWine is not affiliated with Apple, CodeWeavers or any game store.

@@ -1,0 +1,1244 @@
+#!/bin/bash
+# MacWine - run Windows applications on macOS (Wine + DXVK + MoltenVK).
+#
+#   macwine create <bottle>                         create a new bottle (Windows 10, 64-bit)
+#   macwine list [--json]                           list bottles
+#   macwine run <bottle> <program.exe> [args...]    run a program in a bottle
+#   macwine launch <bottle> <store> <id>            start a game (steam|epic|gog|ubisoft|exe)
+#   macwine install <bottle> <store> <id>           install a game through its store
+#   macwine setup-store <bottle> <store>            install and start a store launcher
+#   macwine steam <bottle>                          shortcut for: setup-store <bottle> steam
+#   macwine accounts [--json]                       connected stores and their status
+#   macwine library <store> [--bottle <b>] [--json] owned + installed games of a store
+#   macwine connect <store> [--bottle <b>]          connect a store; its bottle is named after the store
+#                                                   (steam, epic, gog, ubisoft) and created when missing
+#   macwine connect epic|gog --code-stdin           finish Epic/GOG sign-in (code on stdin)
+#   macwine sync <store>                            refresh the cached owned-games list
+#   macwine disconnect <store>                      remove the local link (store account untouched)
+#   macwine set-key steam                           store a Steam Web API key in the Keychain
+#   macwine open <file.exe|.msi> [--bottle <b>]     open a file (Finder double-click)
+#   macwine shortcut <bottle> <store> <id> --name <name> [--dest <folder>] [--icon <image|exe>]
+#                                                   create a .app shortcut with the program icon
+#   macwine icon <program.exe> <output.png>         extract the icon from an .exe
+#   macwine settings <bottle> [--json]              bottle settings
+#   macwine d3dmetal status|import <GPTK .dmg>      DirectX 12 via Apple D3DMetal (user-provided)
+#   macwine set <bottle> <key> <value>              fps <n|0>, graphics dxvk|wined3d|d3dmetal,
+#                                                   windows win11|win10|win7, hud 0|1
+#   macwine components list|install <bottle> <id...> Windows components (.NET, Visual C++, DirectX...)
+#   macwine cfg <bottle>                            Wine configuration (winecfg)
+#   macwine kill <bottle>                           stop all processes in a bottle
+#   macwine version [--json]                        component versions
+#   macwine runtime status|install [--json]         downloadable Wine runtime
+#
+# Options: --json (machine-readable output), --detach (start in background and return).
+# Graphics: DXVK (DirectX 9-11 -> Vulkan -> MoltenVK -> Metal), msync synchronization.
+set -euo pipefail
+
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+SELF_DIR="$(dirname "$SELF")"
+MACWINE_HOME="${MACWINE_HOME:-$HOME/MacWine}"
+# Uvnitr MacWine.app je CLI i runtime v Contents/Resources (starsi rozlozeni: Contents/MacOS/runtime).
+# Runtime lookup: $MACWINE_RUNTIME, bundled in the app (dev builds), downloaded runtime
+# (~/Library/Application Support/MacWine/runtimes/current), legacy ~/MacWine/runtime.
+RUNTIMES="${MACWINE_RUNTIMES:-$HOME/Library/Application Support/MacWine/runtimes}"
+RUNTIME_MANIFEST="${MACWINE_RUNTIME_MANIFEST:-$SELF_DIR/runtime.json}"
+if [ -z "${MACWINE_RUNTIME:-}" ]; then
+  for d in "$SELF_DIR/runtime" "$SELF_DIR/../MacOS/runtime" "$RUNTIMES/current"; do
+    if [ -x "$d/lib/wine/x86_64-unix/wine" ]; then MACWINE_RUNTIME="$(cd "$d" && pwd)"; break; fi
+  done
+fi
+RUNTIME="${MACWINE_RUNTIME:-$MACWINE_HOME/runtime}"
+BOTTLES="$MACWINE_HOME/bottles"
+WINE="$RUNTIME/lib/wine/x86_64-unix/wine"
+WINESERVER="$RUNTIME/bin/wineserver"
+TOOLS="$RUNTIME/lib/macwine"
+DXVK_DLLS="d3d9 d3d10 d3d10_1 d3d10core d3d11"
+APP_BUNDLE_ID="cz.navratil.macwine"
+
+STEAM_URL="https://cdn.cloudflare.steamstatic.com/client/installer/SteamSetup.exe"
+EPIC_URL="https://launcher-public-service-prod06.ol.epicgames.com/launcher/api/installer/download/EpicGamesLauncherInstaller.msi"
+GOG_URL="https://webinstallers.gog-statics.com/download/GOG_Galaxy_2.0.exe"
+UBISOFT_URL="https://ubi.li/4vxt9"
+
+STEAM_EXE='C:\Program Files (x86)\Steam\steam.exe'
+EPIC_EXE='C:\Program Files (x86)\Epic Games\Launcher\Portal\Binaries\Win64\EpicGamesLauncher.exe'
+GOG_EXE='C:\Program Files (x86)\GOG Galaxy\GalaxyClient.exe'
+UBISOFT_EXE='C:\Program Files (x86)\Ubisoft\Ubisoft Game Launcher\UbisoftConnect.exe'
+
+die() { echo "macwine: $*" >&2; exit 1; }
+
+# --- prepinace spolecne pro vsechny prikazy ---
+JSON=0 DETACH=0
+args=()
+for a in "$@"; do
+  case "$a" in
+    --json) JSON=1 ;;
+    --detach) DETACH=1 ;;
+    *) args+=("$a") ;;
+  esac
+done
+set -- ${args[@]+"${args[@]}"}
+
+json_str() { # JSON retezec vcetne uvozovek
+  local s="${1//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\n'/\\n}"; s="${s//$'\t'/\\t}"
+  printf '"%s"' "$s"
+}
+
+# --- nastaveni bottlu: <bottle>/macwine.conf (klic=hodnota) ---
+conf_get() { # bottle klic vychozi
+  local f="$BOTTLES/$1/macwine.conf" v=""
+  [ -f "$f" ] && v="$(grep -m1 "^$2=" "$f" | cut -d= -f2-)" || true
+  # prevzeti stareho souboru macwine-fps
+  if [ -z "$v" ] && [ "$2" = fps ] && [ -f "$BOTTLES/$1/macwine-fps" ]; then v="$(tr -dc 0-9 < "$BOTTLES/$1/macwine-fps")"; fi
+  echo "${v:-$3}"
+}
+conf_set() { # bottle klic hodnota
+  local f="$BOTTLES/$1/macwine.conf"
+  touch "$f"
+  grep -v "^$2=" "$f" > "$f.tmp" || true
+  echo "$2=$3" >> "$f.tmp"
+  mv "$f.tmp" "$f"
+}
+win_version() { # bottle
+  local v
+  v="$(grep -m1 -A3 '^\[Software\\\\Wine\]' "$BOTTLES/$1/user.reg" 2>/dev/null | grep -m1 '^"Version"=' | cut -d'"' -f4)" || true
+  echo "${v:-win10}"
+}
+bottle_running() { # bottle -> 0 kdyz bezi wineserver bottlu
+  local st dev ino
+  st="$(stat -f '%d %i' "$BOTTLES/$1" 2>/dev/null)" || return 1
+  dev="${st% *}"; ino="${st#* }"
+  local dir; dir="$(printf '/tmp/.wine-%s/server-%x-%x' "$(id -u)" "$dev" "$ino")"
+  # a running wineserver keeps its "lock" file open; files left behind by a killed server do not count
+  [ -S "$dir/socket" ] && [ -n "$(lsof -t "$dir/lock" 2>/dev/null)" ]
+}
+
+# --- DirectX 12 (and better DirectX 11) through Apple's D3DMetal from the Game Porting Toolkit ---
+# MacWine never ships D3DMetal: every user downloads the Game Porting Toolkit from Apple (free Apple
+# account) and imports it once. Bottles with graphics=d3dmetal then run on a copy of the runtime
+# (APFS clone, no extra space) where Wine's d3d11/d3d12/dxgi are replaced by D3DMetal's.
+D3DM_DIR="$MACWINE_HOME/d3dmetal"
+D3DM_GPTK="$D3DM_DIR/gptk"
+d3dmetal_installed() { [ -f "$D3DM_GPTK/external/libd3dshared.dylib" ] && [ -f "$D3DM_GPTK/wine/x86_64-unix/d3d12.so" ]; }
+
+d3dmetal_runtime() { # -> runtime variant with D3DMetal overlaid (created once per runtime build)
+  local key dest tmp
+  key="$(cat "$RUNTIME/lib/macwine/runtime-version" 2>/dev/null || echo dev)-$(stat -f %i "$WINE")"
+  dest="$D3DM_DIR/runtime-$key"
+  if [ ! -x "$dest/lib/wine/x86_64-unix/wine" ]; then
+    echo "Preparing D3DMetal runtime..." >&2
+    tmp="$D3DM_DIR/.runtime.tmp"; rm -rf "${tmp:?}"
+    cp -cR "$RUNTIME/" "$tmp"
+    cp -c "$D3DM_GPTK"/wine/x86_64-windows/* "$tmp/lib/wine/x86_64-windows/"
+    cp -c "$D3DM_GPTK"/wine/x86_64-unix/* "$tmp/lib/wine/x86_64-unix/"
+    cp -c "$D3DM_GPTK/external/libd3dshared.dylib" "$tmp/lib/"
+    mv "$tmp" "$dest"
+  fi
+  echo "$dest"
+}
+
+setup_env() { # bottle
+  export WINEPREFIX="$BOTTLES/$1"
+  if [ "$(conf_get "$1" graphics dxvk)" = d3dmetal ]; then
+    d3dmetal_installed || die "bottle '$1' uses D3DMetal, but it is not installed (macwine d3dmetal import <Game Porting Toolkit .dmg>)"
+    RUNTIME="$(d3dmetal_runtime)"; WINE="$RUNTIME/lib/wine/x86_64-unix/wine"; WINESERVER="$RUNTIME/bin/wineserver"
+    export CX_APPLEGPTK_LIBD3DSHARED_PATH="$RUNTIME/lib/libd3dshared.dylib" CX_ACTIVE_GRAPHICS_BACKEND=d3dmetal
+    export DYLD_FALLBACK_FRAMEWORK_PATH="$D3DM_GPTK/external"
+  fi
+  export WINESERVER
+  export WINEMSYNC=1
+  export ROSETTA_ADVERTISE_AVX="${ROSETTA_ADVERTISE_AVX-1}"  # hlasit AVX pod Rosettou (vyzaduji ho novejsi hry a Chromium)
+  export WINEDEBUG="${WINEDEBUG:--all}"
+  export DYLD_FALLBACK_LIBRARY_PATH="${MACWINE_MVK_DIR:+$MACWINE_MVK_DIR:}$RUNTIME/lib:/usr/lib"
+  export DXVK_LOG_LEVEL="${DXVK_LOG_LEVEL:-none}"
+  # MACWINE_LOG=1: ladici logy Wine a DXVK do ~/MacWine/logs (dedi je i hry spustene ze Steamu)
+  if [ "${MACWINE_LOG:-$(conf_get "$1" log 0)}" = 1 ]; then
+    LOGDIR="$MACWINE_HOME/logs/$1-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$LOGDIR"
+    export WINEDEBUG="err+all,fixme-all" DXVK_LOG_LEVEL=info DXVK_LOG_PATH="$LOGDIR"
+    echo "Logs: $LOGDIR" >&2
+    exec 2>"$LOGDIR/wine.log"
+  fi
+  export DXVK_STATE_CACHE_PATH="$WINEPREFIX"
+  # GStreamer for in-game videos (winegstreamer): plugins from the runtime, registry cache per user
+  if [ -d "$RUNTIME/lib/gstreamer-1.0" ]; then
+    export GST_PLUGIN_SYSTEM_PATH="$RUNTIME/lib/gstreamer-1.0"
+    export GST_REGISTRY="$MACWINE_HOME/gstreamer-registry.x86_64.bin"
+    export GST_REGISTRY_FORK=no
+    unset GST_PLUGIN_PATH
+  fi
+  # Ukazatel FPS ve hre: MACWINE_HUD=1 nebo nastaveni bottlu hud=1
+  if [ "${MACWINE_HUD:-$(conf_get "$1" hud 0)}" = 1 ]; then export DXVK_HUD="fps,frametimes,gpuload,compiler"; fi
+  # Limit FPS: MACWINE_FPS=<n>, jinak nastaveni bottlu fps=<n>
+  local fps="${MACWINE_FPS:-$(conf_get "$1" fps 0)}"
+  if [ -n "$fps" ] && [ "$fps" != 0 ]; then export DXVK_FRAME_RATE="$fps"; fi
+}
+
+# Pravidla kompatibility:
+#  - vestavene prohlizece Steamu a Rockstar launcheru (Chromium) dostanou parametry,
+#    se kterymi se na Wine vykresli
+#  - Rockstar Launcher.exe pouziva wined3d misto DXVK
+#  - PlayGTAV.exe se spousti bez BattlEye
+# Parametry pridava upraveny kernelbase.dll (patches/wine-macwine-compat.patch).
+install_compat() {
+  local reg dll
+  reg="$(mktemp -t macwine).reg"
+  {
+    printf 'REGEDIT4\n\n'
+    printf '[HKEY_CURRENT_USER\\Software\\MacWine\\Compat\\steamwebhelper.exe]\n'
+    printf '"AppendArgs"="--no-sandbox --in-process-gpu --disable-gpu"\n'
+    printf '"ForbiddenArg"="--type=crashpad-handler"\n\n'
+    printf '[HKEY_CURRENT_USER\\Software\\MacWine\\Compat\\SocialClubHelper.exe]\n'
+    printf '"AppendArgs"="--in-process-gpu --use-gl=angle --use-angle=swiftshader"\n\n'
+    # GOG Galaxy and Ubisoft Connect render their UI with Chromium (CEF) like Steam
+    printf '[HKEY_CURRENT_USER\\Software\\MacWine\\Compat\\GalaxyClient Helper.exe]\n'
+    printf '"AppendArgs"="--no-sandbox --in-process-gpu --disable-gpu"\n'
+    printf '"ForbiddenArg"="--type=crashpad-handler"\n\n'
+    printf '[HKEY_CURRENT_USER\\Software\\MacWine\\Compat\\UplayWebCore.exe]\n'
+    printf '"AppendArgs"="--no-sandbox --in-process-gpu --disable-gpu"\n'
+    printf '"ForbiddenArg"="--type=crashpad-handler"\n\n'
+    # Ubisoft Connect hosts the Chromium browser inside upc.exe itself - without these its window stays white
+    printf '[HKEY_CURRENT_USER\\Software\\MacWine\\Compat\\upc.exe]\n'
+    printf '"AppendArgs"="--no-sandbox --in-process-gpu --disable-gpu"\n\n'
+    printf '[HKEY_CURRENT_USER\\Software\\MacWine\\Compat\\PlayGTAV.exe]\n'
+    printf '"AppendArgs"="-nobattleye"\n\n'
+    printf '[HKEY_CURRENT_USER\\Software\\Wine\\AppDefaults\\Launcher.exe\\DllOverrides]\n'
+    for dll in $DXVK_DLLS; do printf '"%s"="builtin"\n' "$dll"; done
+  } > "$reg"
+  "$WINE" regedit /S "$reg"
+  # With the bottle already running (e.g. Steam open) "-w" would block until everything exits
+  bottle_running "$(basename "$WINEPREFIX")" || "$WINESERVER" -w
+  rm -f "$reg"
+}
+
+write_dll_overrides() { # native,builtin (DXVK) nebo builtin (wined3d)
+  local dll reg
+  reg="$(mktemp -t macwine).reg"
+  {
+    printf 'REGEDIT4\n\n[HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides]\n'
+    for dll in $DXVK_DLLS; do printf '"%s"="%s"\n' "$dll" "$1"; done
+  } > "$reg"
+  "$WINE" regedit /S "$reg"
+  "$WINESERVER" -w
+  rm -f "$reg"
+}
+
+COMPAT_VERSION=3   # bump when install_compat changes; bottles are updated on their next start
+ensure_compat() { # bottle
+  [ "$(conf_get "$1" compat 1)" = "$COMPAT_VERSION" ] && return 0
+  install_compat >/dev/null 2>&1 && conf_set "$1" compat "$COMPAT_VERSION"
+}
+
+install_dxvk() { # nakopiruje DLL z DXVK do bottlu a nastavi je v registru
+  local dll src="${MACWINE_DXVK_DIR:-$RUNTIME/lib/dxvk}"
+  for dll in $DXVK_DLLS; do
+    cp "$src/x86_64-windows/$dll.dll" "$WINEPREFIX/drive_c/windows/system32/"
+    cp "$src/i386-windows/$dll.dll" "$WINEPREFIX/drive_c/windows/syswow64/"
+  done
+  write_dll_overrides native,builtin
+}
+
+# Aktualizace Wine (wineboot -u) prepise DLL v system32 vestavenymi; bez kontroly by se DXVK
+# po kazde nove verzi runtime tise vypnulo. Pri nesouladu nejdriv dokoncime aktualizaci bottlu.
+ensure_dxvk() { # bottle
+  [ "$(conf_get "$1" graphics dxvk)" = dxvk ] || return 0
+  local src="${MACWINE_DXVK_DIR:-$RUNTIME/lib/dxvk}"
+  cmp -s "$src/x86_64-windows/d3d11.dll" "$WINEPREFIX/drive_c/windows/system32/d3d11.dll" && return 0
+  echo "Updating bottle and restoring DXVK..." >&2
+  "$WINE" wineboot -u >/dev/null 2>&1 || true
+  "$WINESERVER" -w
+  install_dxvk
+}
+
+need_bottle() {
+  [ -n "${1:-}" ] || die "missing bottle name"
+  case "$1" in */*|.*) die "invalid bottle name: $1" ;; esac
+  [ -d "$BOTTLES/$1" ] || die "bottle '$1' does not exist (create it: macwine create $1)"
+}
+
+unix_path() { # Windows cesta (C:\...) nebo unixova -> unixova cesta v bottlu
+  case "$1" in
+    [A-Za-z]:\\*|[A-Za-z]:/*)
+      local d rest
+      d="$(printf '%s' "${1:0:1}" | tr 'A-Z' 'a-z')"; rest="${1:2}"; rest="${rest//\\//}"
+      if [ "$d" = c ]; then echo "$WINEPREFIX/drive_c$rest"; else echo "$WINEPREFIX/dosdevices/$d:$rest"; fi ;;
+    *) echo "$1" ;;
+  esac
+}
+
+wine_start() { # program [argumenty...] - spusti ve Wine (s --detach na pozadi)
+  local dir
+  dir="$(dirname "$(unix_path "$1")")"
+  [ -d "$dir" ] && cd "$dir"
+  if [ "$DETACH" = 1 ]; then
+    nohup "$WINE" "$@" >/dev/null 2>&1 &
+    disown || true
+    exit 0
+  fi
+  exec "$WINE" "$@"
+}
+
+store_exe() { # obchod -> Windows cesta k launcheru
+  case "$1" in
+    steam) echo "$STEAM_EXE" ;; epic) echo "$EPIC_EXE" ;;
+    gog) echo "$GOG_EXE" ;; ubisoft) echo "$UBISOFT_EXE" ;;
+    *) die "unknown store: $1 (steam|epic|gog|ubisoft)" ;;
+  esac
+}
+
+download() { # url soubor
+  echo "Downloading $(basename "$2")..." >&2
+  curl -fL --retry 3 -o "$2" "$1"
+}
+
+setup_store() { # bottle obchod - nainstaluje launcher, pokud chybi
+  local exe tmp
+  exe="$(unix_path "$(store_exe "$2")")"
+  [ -f "$exe" ] && return 0
+  tmp="$(mktemp -d)"
+  case "$2" in
+    steam)   download "$STEAM_URL" "$tmp/SteamSetup.exe"; "$WINE" "$tmp/SteamSetup.exe" /S ;;
+    epic)    download "$EPIC_URL" "$tmp/EpicInstaller.msi"; "$WINE" msiexec /i "$tmp/EpicInstaller.msi" /qn ;;
+    gog)     download "$GOG_URL" "$tmp/GOG_Galaxy.exe"; "$WINE" "$tmp/GOG_Galaxy.exe" /VERYSILENT /NORESTART ;;
+    ubisoft) download "$UBISOFT_URL" "$tmp/UbisoftConnectInstaller.exe"; "$WINE" "$tmp/UbisoftConnectInstaller.exe" /S ;;
+  esac
+  "$WINESERVER" -w
+  rm -rf "$tmp"
+  [ -f "$exe" ] || die "installing $2 failed ($exe is missing)"
+}
+
+store_url() { # akce obchod id -> URL pro launcher
+  case "$2:$1" in
+    steam:launch)   echo "steam://rungameid/$3" ;;
+    steam:install)  echo "steam://install/$3" ;;
+    epic:launch)    echo "com.epicgames.launcher://apps/$3?action=launch&silent=true" ;;
+    epic:install)   echo "com.epicgames.launcher://apps/$3?action=install" ;;
+    ubisoft:launch) echo "uplay://launch/$3/0" ;;
+    ubisoft:install) echo "uplay://install/$3" ;;
+    *) die "action $1 is not supported for $2" ;;
+  esac
+}
+
+# Najde nainstalovanou MacWine.app (pro zastupce, ktere ji maji najit i po presunuti).
+app_cli_path() {
+  if [ -f "$SELF_DIR/../Info.plist" ]; then echo "$SELF"; return; fi
+  local app
+  app="$(mdfind "kMDItemCFBundleIdentifier == '$APP_BUNDLE_ID'" 2>/dev/null | head -1)" || true
+  if [ -n "$app" ] && [ -x "$app/Contents/Resources/macwine" ]; then echo "$app/Contents/Resources/macwine"; else echo "$SELF"; fi
+}
+
+extract_icon() { # exe vystup.png
+  local tool="$TOOLS/exeicon" tmp
+  [ -x "$tool" ] || tool="$SELF_DIR/tools/exeicon"
+  [ -x "$tool" ] || die "exeicon tool is missing (build it: tools/build-tools.sh)"
+  tmp="$(mktemp -d)"
+  "$tool" "$1" "$tmp/icon" >/dev/null || { rm -rf "$tmp"; return 1; }
+  if [ -f "$tmp/icon.png" ]; then cp "$tmp/icon.png" "$2"
+  else sips -s format png "$tmp/icon.ico" --out "$2" >/dev/null; fi
+  rm -rf "$tmp"
+}
+
+make_icns() { # png vystup.icns
+  local set s
+  set="$(mktemp -d)/icon.iconset"; mkdir -p "$set"
+  for s in 16 32 128 256 512; do
+    sips -z $s $s "$1" --out "$set/icon_${s}x${s}.png" >/dev/null
+    sips -z $((s*2)) $((s*2)) "$1" --out "$set/icon_${s}x${s}@2x.png" >/dev/null
+  done
+  iconutil -c icns "$set" -o "$2"
+  rm -rf "$(dirname "$set")"
+}
+
+store_icon_exe() { # obchod id -> unixova cesta k .exe pro ikonu (nebo prazdne)
+  case "$1" in
+    exe) unix_path "$2" ;;
+    gog) if [[ "$2" =~ ^[0-9]+$ ]]; then local i; i="$(gog_info_file "$(basename "$WINEPREFIX")" "$2")"
+           [ -n "$i" ] && printf '%s/%s' "$(dirname "$i")" "$("$JQ" -r '(.playTasks // []) | map(select(.isPrimary == true)) | first | .path // empty' "$i" | tr '\\' '/')"
+         else unix_path "$2"; fi ;;
+    *) unix_path "$(store_exe "$1")" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# Stores: accounts, owned libraries, local installs (contract: .collab/store-contract.md)
+# Secrets never leave the Keychain (service "MacWine") or the store's own sign-in.
+# ---------------------------------------------------------------------------
+ACCOUNTS="$MACWINE_HOME/accounts"
+JQ=/usr/bin/jq
+STORES="steam epic gog ubisoft"
+
+keychain_get() { security find-generic-password -s MacWine -a "$1" -w 2>/dev/null || true; }
+
+store_bottle() { # store -> bottle remembered by "connect", else the store's own bottle (named after it)
+  local f="$ACCOUNTS/$1/bottle"
+  if [ -f "$f" ] && [ -d "$BOTTLES/$(cat "$f")" ]; then cat "$f"; return; fi
+  [ -d "$BOTTLES/$1" ] && echo "$1"
+  return 0
+}
+
+steam_dir() { echo "$BOTTLES/$1/drive_c/Program Files (x86)/Steam"; }
+
+steam_user() { # bottle -> "steamid64<TAB>persona" of the most recent signed-in user
+  local f; f="$(steam_dir "$1")/config/loginusers.vdf"
+  [ -f "$f" ] || return 0
+  awk -F'"' '
+    /^\t"7656[0-9]+"/ { id=$2; persona=""; recent=0 }
+    /"PersonaName"/ { persona=$4 }
+    /"MostRecent"/ { if ($4=="1") recent=1 }
+    /^\t}/ { if (id!="") { if (recent || first=="") { first=id "\t" persona } ; if (recent) { print id "\t" persona; done=1; exit } } }
+    END { if (!done && first!="") print first }' "$f"
+}
+
+steam_local_tsv() { # bottle -> "appid<TAB>name<TAB>installed(0/1)" for every app manifest in all libraries
+  local sd lib libs f appid name flags
+  sd="$(steam_dir "$1")"
+  [ -f "$sd/steamapps/libraryfolders.vdf" ] || return 0
+  libs="$(awk -F'"' '/"path"/ {print $4}' "$sd/steamapps/libraryfolders.vdf")"
+  while IFS= read -r lib; do
+    [ -n "$lib" ] || continue
+    lib="$(WINEPREFIX="$BOTTLES/$1" unix_path "${lib//\\\\/\\}")"
+    for f in "$lib"/steamapps/appmanifest_*.acf; do
+      [ -f "$f" ] || continue
+      appid="$(awk -F'"' '/^\t"appid"/ {print $4; exit}' "$f")"
+      name="$(awk -F'"' '/^\t"name"/ {print $4; exit}' "$f")"
+      flags="$(awk -F'"' '/^\t"StateFlags"/ {print $4; exit}' "$f")"
+      [ "$appid" = 228980 ] && continue   # Steamworks Common Redistributables
+      printf '%s\t%s\t%s\n' "$appid" "$name" "$(( (${flags:-0} & 4) ? 1 : 0 ))"
+    done
+  done <<< "$libs"
+}
+
+steam_sync() { # bottle -> refresh $ACCOUNTS/steam/owned.json via the official Web API (needs user's key)
+  local key user id
+  key="$(keychain_get steam-apikey)"; user="$(steam_user "$1")"; id="${user%%$'\t'*}"
+  [ -n "$key" ] && [ -n "$id" ] || return 1
+  mkdir -p "$ACCOUNTS/steam"
+  # The key goes to curl via its config on stdin, so it never appears in the process list.
+  printf 'url = "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=%s&steamid=%s&include_appinfo=1&include_played_free_games=1&format=json"\n' "$key" "$id" |
+    curl -sf -m 30 -K - > "$ACCOUNTS/steam/owned.tmp" || { rm -f "$ACCOUNTS/steam/owned.tmp"; return 2; }
+  # Without a "games" array (e.g. game details not visible) this is NOT an empty library - it is a failure.
+  "$JQ" -e '.response.games | type == "array"' "$ACCOUNTS/steam/owned.tmp" >/dev/null || { rm -f "$ACCOUNTS/steam/owned.tmp"; return 3; }
+  "$JQ" '[.response.games[]? | {id: (.appid|tostring), name: .name}]' "$ACCOUNTS/steam/owned.tmp" > "$ACCOUNTS/steam/owned.json"
+  rm -f "$ACCOUNTS/steam/owned.tmp"
+}
+
+steam_sync_or_die() { # bottle
+  local rc=0
+  steam_sync "$1" || rc=$?
+  case $rc in
+    0) ;;
+    1) die "Steam: sign in to Steam and add a Web API key to load the full library" ;;
+    3) die "Steam: the Web API returned no game list - make sure your profile's game details are visible, then try again" ;;
+    *) die "Steam: the Web API request failed (check the key and the network)" ;;
+  esac
+}
+
+steam_cache_tsv() { # bottle -> "appid<TAB>name" of every GAME in the signed-in account's library.
+  # The Steam client caches artwork for each app of the account's library (appcache/librarycache/<appid>);
+  # names and types come from its appinfo.vdf. No API key needed - only a signed-in Steam client.
+  local sd tool
+  sd="$(steam_dir "$1")"
+  [ -d "$sd/appcache/librarycache" ] && [ -f "$sd/appcache/appinfo.vdf" ] || return 0
+  tool="$TOOLS/steamappinfo"; [ -x "$tool" ] || tool="$SELF_DIR/tools/steamappinfo"; [ -x "$tool" ] || return 0
+  # shellcheck disable=SC2046
+  "$tool" "$sd/appcache/appinfo.vdf" $(ls "$sd/appcache/librarycache" | grep -E '^[0-9]+$') 2>/dev/null |
+    awk -F'\t' 'tolower($2)=="game" && $3!="" {print $1 "\t" $3}'
+}
+
+steam_library_json() { # bottle
+  local owned="[]" local_json
+  # With a key the owned list must load (fail loudly, the app keeps showing local data); without a key: local only.
+  if [ -n "$(keychain_get steam-apikey)" ] && [ ! -f "$ACCOUNTS/steam/owned.json" ]; then steam_sync_or_die "$1"; fi
+  if [ -f "$ACCOUNTS/steam/owned.json" ]; then owned="$(cat "$ACCOUNTS/steam/owned.json")"
+  else owned="$(steam_cache_tsv "$1" | "$JQ" -R -s '[split("\n")[] | select(length>0) | split("\t") | {id: .[0], name: .[1]}]')"; fi
+  local_json="$(steam_local_tsv "$1" | "$JQ" -R -s '[split("\n")[] | select(length>0) | split("\t") | {id: .[0], name: .[1], installed: (.[2]=="1")}]')"
+  # Cover art: the Steam client's own cache first (portrait cover, then header), then Steam's CDN
+  local lc art_json f id
+  lc="$(steam_dir "$1")/appcache/librarycache"
+  art_json="$(for f in "$lc"/*/library_600x900.jpg "$lc"/*/header.jpg; do
+      [ -f "$f" ] || continue; id="$(basename "$(dirname "$f")")"; printf '%s\t%s\n' "$id" "$f"
+    done | "$JQ" -R -s 'reduce (split("\n")[] | select(length>0) | split("\t")) as $x ({}; if .[$x[0]] then . else .[$x[0]] = ("file://" + ($x[1] | @uri | gsub("%2F"; "/"))) end)')"
+  "$JQ" -n --argjson owned "$owned" --argjson local "$local_json" --arg bottle "$1" --argjson localart "$art_json" '
+    def art(id): ($localart[id] // "https://cdn.cloudflare.steamstatic.com/steam/apps/\(id)/library_600x900.jpg");
+    ($local | map({key: .id, value: .}) | from_entries) as $L |
+    ($owned | map(.id)) as $O |
+    [ $owned[] | {id, name, installed: ($L[.id].installed // false), bottle: $bottle, executable: null, artworkURL: art(.id), source: "owned"} ]
+    + [ $local[] | select(.id as $i | $O | index($i) | not) | {id, name, installed, bottle: $bottle, executable: null, artworkURL: art(.id), source: "local"} ]
+    | sort_by(.name | ascii_downcase)'
+}
+
+win_path() { # unix path inside the bottle -> C:\...
+  local p="${1#"$BOTTLES/$2/drive_c"}"
+  printf 'C:%s' "${p//\//\\}"
+}
+
+epic_local_json() { # bottle -> installed Epic games (launcher manifests)
+  local d="$BOTTLES/$1/drive_c/ProgramData/Epic/EpicGamesLauncher/Data/Manifests" f
+  ls "$d"/*.item >/dev/null 2>&1 || { echo '[]'; return; }
+  "$JQ" -s --arg bottle "$1" '[ .[] | {id: .AppName, name: .DisplayName, installed: true, bottle: $bottle,
+     executable: ((.InstallLocation // "") + "\\" + (.LaunchExecutable // "") | gsub("/"; "\\")), artworkURL: null, source: "local"} ]' "$d"/*.item
+}
+
+gog_local_json() { # bottle -> installed GOG games (goggame-*.info next to each game)
+  local f dir out="" item
+  while IFS= read -r f; do
+    dir="$(dirname "$f")"
+    item="$("$JQ" -c --arg bottle "$1" --arg dir "$(win_path "$dir" "$1")" '{id: (.gameId|tostring), name: .name, installed: true, bottle: $bottle,
+       executable: ((.playTasks // []) | map(select(.isPrimary == true)) | first | if . then ($dir + "\\" + (.path|gsub("/"; "\\"))) else null end),
+       artworkURL: null, source: "local"}' "$f" 2>/dev/null)" || continue
+    out="$out$item"$'\n'
+  done < <(find "$BOTTLES/$1/drive_c" -maxdepth 6 -name 'goggame-*.info' 2>/dev/null)
+  printf '%s' "$out" | "$JQ" -s '.'
+}
+
+ubisoft_local_json() { # bottle -> installed Ubisoft games (registry)
+  awk -v bottle="$1" '
+    /^\[Software\\\\Wow6432Node\\\\Ubisoft\\\\Launcher\\\\Installs\\\\[0-9]+\]/ { match($0, /Installs\\\\[0-9]+/); id=substr($0, RSTART+10, RLENGTH-10); next }
+    /^\[/ { id="" }
+    id!="" && /^"InstallDir"=/ { dir=$0; sub(/^"InstallDir"="/, "", dir); sub(/"$/, "", dir); gsub(/\\\\/, "\\", dir); print id "\t" dir }
+  ' "$BOTTLES/$1/system.reg" 2>/dev/null |
+  "$JQ" -R -s --arg bottle "$1" '[split("\n")[] | select(length>0) | split("\t") |
+     {id: .[0], name: (.[1] | rtrimstr("/") | rtrimstr("\\") | split("/") | last | split("\\") | last), installed: true,
+      bottle: $bottle, executable: null, artworkURL: null, source: "local"}]'
+}
+
+ubisoft_owned_tsv() { # bottle -> "uplay_id<TAB>name<TAB>thumb" of the signed-in account's games.
+  # Ubisoft has no public library API; Ubisoft Connect caches the configuration of every product of the
+  # account (cache/configuration/configurations). The ownership list itself is encrypted, so this is the source.
+  local f tool
+  tool="$TOOLS/ubiconfig"; [ -x "$tool" ] || tool="$SELF_DIR/tools/ubiconfig"; [ -x "$tool" ] || return 0
+  for f in "$BOTTLES/$1"/drive_c/users/*/AppData/Local/"Ubisoft Game Launcher"/cache/configuration/configurations; do
+    [ -f "$f" ] && "$tool" "$f" 2>/dev/null
+  done | sort -t$'\t' -k1,1 -u
+}
+
+ubisoft_library_json() { # bottle -> account games (launcher cache) merged with installed games (registry)
+  local owned local_json
+  owned="$(ubisoft_owned_tsv "$1" | "$JQ" -R -s '[split("\n")[] | select(length>0) | split("\t") |
+     {id: .[0], name: .[1], artworkURL: (if (.[2] // "") | test("^[0-9a-f]+\\.(jpg|png)$") then "https://ubistatic3-a.akamaihd.net/orbit/uplay_launcher_3_0/assets/" + .[2] else null end)}]')"
+  local_json="$(ubisoft_local_json "$1")"
+  "$JQ" -n --argjson owned "$owned" --argjson local "$local_json" --arg bottle "$1" '
+    ($local | map({key: .id, value: .}) | from_entries) as $L |
+    ($owned | map(.id)) as $O |
+    [ $owned[] | {id, name, installed: ($L[.id] != null), bottle: $bottle, executable: null, artworkURL, source: "owned"} ]
+    + [ $local[] | select(.id as $i | $O | index($i) | not) ]
+    | sort_by(.name | ascii_downcase)'
+}
+
+# --- Epic via Legendary (open-source Epic client, GPLv3: github.com/legendary-gl/legendary) ---
+LEGENDARY_VERSION=0.21.1
+LEGENDARY_SHA256=d87978321dba9cb731fab40c72f0a30bed55baca8b5341ab21024c5733cd837e
+LEGENDARY_URL="https://github.com/legendary-gl/legendary/releases/download/$LEGENDARY_VERSION/legendary_macOS_arm64"
+EPIC_LOGIN_URL="https://www.epicgames.com/id/login?redirectUrl=https%3A%2F%2Fwww.epicgames.com%2Fid%2Fapi%2Fredirect%3FclientId%3D34a02cf8f4414e29b15921876da36f9a%26responseType%3Dcode"
+export LEGENDARY_CONFIG_PATH="$ACCOUNTS/epic/legendary"
+
+legendary_bin() { # downloads the pinned Legendary binary on first use and verifies its checksum
+  local bin="$MACWINE_HOME/tools/legendary-$LEGENDARY_VERSION"
+  if [ ! -x "$bin" ]; then
+    mkdir -p "$MACWINE_HOME/tools"
+    echo "Downloading Legendary $LEGENDARY_VERSION..." >&2
+    curl -fL --retry 3 -o "$bin.part" "$LEGENDARY_URL"
+    [ "$(shasum -a 256 "$bin.part" | cut -d' ' -f1)" = "$LEGENDARY_SHA256" ] || { rm -f "$bin.part"; die "Legendary checksum mismatch - download refused"; }
+    chmod +x "$bin.part"; xattr -d com.apple.quarantine "$bin.part" 2>/dev/null || true
+    mv "$bin.part" "$bin"
+  fi
+  echo "$bin"
+}
+
+epic_signed_in() { [ -f "$LEGENDARY_CONFIG_PATH/user.json" ]; }
+
+epic_account_name() { "$JQ" -r '.displayName // empty' "$LEGENDARY_CONFIG_PATH/user.json" 2>/dev/null || true; }
+
+epic_library_json() { # bottle -> owned (Legendary) merged with installed (Legendary + launcher manifests)
+  local leg owned='[]' inst='{}' launcher
+  launcher="$(epic_local_json "$1")"
+  if epic_signed_in; then
+    leg="$(legendary_bin)"
+    # --platform Windows: on macOS Legendary otherwise lists only games that have a Mac version
+    owned="$("$leg" list --json --platform Windows 2>/dev/null | "$JQ" -c 'if type == "array" then
+        map({app_name, app_title, metadata: {keyImages: (.metadata.keyImages // [] | map(select(.type == "DieselGameBoxTall" or .type == "DieselGameBox")))}})
+      else empty end')" && [ -n "$owned" ] \
+      || { rm -f "$ACCOUNTS/epic/owned.ok"; die "Epic: could not load the library (the sign-in may have expired - connect Epic again)"; }
+    inst="$("$leg" list-installed --json 2>/dev/null)" && printf '%s' "$inst" | "$JQ" -e 'type == "array"' >/dev/null \
+      || die "Epic: could not read installed games"
+    inst="$(printf '%s' "$inst" | "$JQ" 'map({key: .app_name, value: .}) | from_entries')"
+    date +%s > "$ACCOUNTS/epic/owned.ok"
+  fi
+  "$JQ" -n --argjson owned "$owned" --argjson inst "$inst" --argjson launcher "$launcher" --arg bottle "$1" '
+    def art(m): ((m.keyImages // []) | (map(select(.type=="DieselGameBoxTall")) + map(select(.type=="DieselGameBox"))) | first | .url) // null;
+    ($owned | map(.app_name)) as $O |
+    [ $owned[] | {id: .app_name, name: .app_title, installed: ($inst[.app_name] != null),
+        bottle: $bottle,
+        executable: (if $inst[.app_name] then ($inst[.app_name].install_path + "/" + $inst[.app_name].executable) else null end),
+        artworkURL: art(.metadata), source: "owned"} ]
+    + [ $launcher[] | select(.id as $i | $O | index($i) | not) ]
+    | sort_by(.name | ascii_downcase)'
+}
+
+# --- GOG via gogdl (open-source GOG downloader of Heroic Games Launcher, GPLv3: github.com/Heroic-Games-Launcher/heroic-gogdl) ---
+# No GOG Galaxy needed: sign-in on gog.com, library from GOG's API, games downloaded directly from GOG.
+GOGDL_VERSION=1.3.0
+GOGDL_SHA256=a85ae9ef80a3e7840b19a416dd4b3c5db2054508c6147315f1c22faa63a29b38
+GOGDL_URL="https://github.com/Heroic-Games-Launcher/heroic-gogdl/releases/download/v$GOGDL_VERSION/gogdl_macos_arm64"
+# Public client of the GOG Galaxy app - the same one gogdl, Heroic and lgogdownloader sign in with
+GOG_CLIENT_ID=46899977096215655
+GOG_CLIENT_SECRET=9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc4de46d9
+GOG_REDIRECT_ENC="https%3A%2F%2Fembed.gog.com%2Fon_login_success%3Forigin%3Dclient"
+GOG_LOGIN_URL="https://auth.gog.com/auth?client_id=$GOG_CLIENT_ID&redirect_uri=$GOG_REDIRECT_ENC&response_type=code&layout=client2"
+GOG_AUTH="$ACCOUNTS/gog/auth.json"
+
+gogdl_bin() { # downloads the pinned gogdl binary on first use and verifies its checksum
+  local bin="$MACWINE_HOME/tools/gogdl-$GOGDL_VERSION"
+  if [ ! -x "$bin" ]; then
+    mkdir -p "$MACWINE_HOME/tools"
+    echo "Downloading gogdl $GOGDL_VERSION..." >&2
+    curl -fL --retry 3 -o "$bin.part" "$GOGDL_URL"
+    [ "$(shasum -a 256 "$bin.part" | cut -d' ' -f1)" = "$GOGDL_SHA256" ] || { rm -f "$bin.part"; die "gogdl checksum mismatch - download refused"; }
+    chmod +x "$bin.part"; xattr -d com.apple.quarantine "$bin.part" 2>/dev/null || true
+    mv "$bin.part" "$bin"
+  fi
+  echo "$bin"
+}
+
+gog_signed_in() { [ -s "$GOG_AUTH" ]; }
+
+gog_account_name() { "$JQ" -r '.username // empty' "$ACCOUNTS/gog/user.json" 2>/dev/null || true; }
+
+gog_token() { # -> valid access token (gogdl refreshes an expired one and saves it)
+  "$(gogdl_bin)" --auth-config-path "$GOG_AUTH" auth 2>/dev/null | "$JQ" -r '.access_token // empty' 2>/dev/null
+}
+
+gog_api() { # url -> GET as the signed-in user; the token goes to curl on stdin, never in argv
+  local t; t="$(gog_token)"; [ -n "$t" ] || return 1
+  printf 'url = "%s"\nheader = "Authorization: Bearer %s"\n' "$1" "$t" | curl -sf -m 30 -K -
+}
+
+gog_login() { # authorization code (or the whole on_login_success address) on stdin
+  local code tmp
+  code="$(head -c 8192 | tr -d '[:space:]')"
+  [[ "$code" =~ [?\&]code=([A-Za-z0-9_-]+) ]] && code="${BASH_REMATCH[1]}"
+  [[ "$code" =~ ^[A-Za-z0-9_-]{16,}$ ]] || die "GOG: this does not look like a sign-in code"
+  mkdir -p "$ACCOUNTS/gog"; tmp="$(umask 077; mktemp "$ACCOUNTS/gog/.token.XXXXXX")"
+  printf 'url = "https://auth.gog.com/token?client_id=%s&client_secret=%s&grant_type=authorization_code&redirect_uri=%s&code=%s"\n' \
+    "$GOG_CLIENT_ID" "$GOG_CLIENT_SECRET" "$GOG_REDIRECT_ENC" "$code" | curl -sf -m 30 -K - > "$tmp" || true
+  unset code
+  "$JQ" -e '.access_token and .refresh_token' "$tmp" >/dev/null 2>&1 \
+    || { rm -f "$tmp"; die "GOG sign-in failed (the code is valid only once and for a short time)"; }
+  (umask 077; "$JQ" --arg c "$GOG_CLIENT_ID" '{($c): (. + {loginTime: now})}' "$tmp" > "$GOG_AUTH")
+  rm -f "$tmp" "$ACCOUNTS/gog/owned.ok"
+  gog_api "https://embed.gog.com/userData.json" | "$JQ" '{username, userId}' > "$ACCOUNTS/gog/user.json" 2>/dev/null || true
+}
+
+gog_owned_json() { # -> [{id, name, artworkURL}] of every game on the account (all pages)
+  local page=1 pages=1 resp all='[]'
+  while [ "$page" -le "$pages" ] && [ "$page" -le 200 ]; do
+    resp="$(gog_api "https://embed.gog.com/account/getFilteredProducts?mediaType=1&sortBy=title&page=$page")" || return 1
+    printf '%s' "$resp" | "$JQ" -e '.products | type == "array"' >/dev/null 2>&1 || return 1
+    pages="$(printf '%s' "$resp" | "$JQ" -r '.totalPages // 1')"
+    all="$(printf '%s' "$resp" | "$JQ" --argjson all "$all" '$all + [.products[] | select(.isGame != false) |
+      {id: (.id|tostring), name: .title, windows: (.worksOn.Windows // true),
+       artworkURL: (if (.image // "") != "" then ("https:" + .image + "_196.jpg") else null end)}]')"
+    page=$((page + 1))
+  done
+  printf '%s' "$all"
+}
+
+gog_library_json() { # bottle -> owned (GOG API) merged with games installed in the bottle
+  local owned='[]' local_json
+  local_json="$(gog_local_json "$1")"
+  if gog_signed_in; then
+    owned="$(gog_owned_json)" || { rm -f "$ACCOUNTS/gog/owned.ok"; die "GOG: could not load the library (the sign-in may have expired - connect GOG again)"; }
+    date +%s > "$ACCOUNTS/gog/owned.ok"
+  fi
+  "$JQ" -n --argjson owned "$owned" --argjson local "$local_json" --arg bottle "$1" '
+    ($local | map({key: .id, value: .}) | from_entries) as $L |
+    ($owned | map(.id)) as $O |
+    [ $owned[] | select(.windows) | {id, name, installed: ($L[.id] != null), bottle: $bottle,
+        executable: ($L[.id].executable // null), artworkURL, source: "owned"} ]
+    + [ $local[] | select(.id as $i | $O | index($i) | not) ]
+    | sort_by(.name | ascii_downcase)'
+}
+
+gog_info_file() { # bottle id -> goggame-<id>.info of the installed game (or empty)
+  find "$BOTTLES/$1/drive_c" -maxdepth 6 -name "goggame-$2.info" 2>/dev/null | head -1
+}
+
+# --- Windows components (winetricks, LGPL: github.com/Winetricks/winetricks) ---
+WINETRICKS_VERSION=20260125
+WINETRICKS_SHA256=431f82fc74000e6c864409f1d8fb495d696c03928808e3e8acffc45179312a7b
+WINETRICKS_URL="https://raw.githubusercontent.com/Winetricks/winetricks/$WINETRICKS_VERSION/src/winetricks"
+# id|winetricks verb|name|description
+COMPONENTS='vcrun2022|vcrun2022|Visual C++ 2015-2022|Runtime most modern Windows apps and games need
+dotnet48|dotnet48|.NET Framework 4.8|Older .NET apps and launchers (slow install)
+dotnetdesktop8|dotnetdesktop8|.NET 8 Desktop Runtime|Newer .NET apps
+d3dx9|d3dx9|DirectX 9 libraries (d3dx9)|Older games built with DirectX 9
+d3dcompiler_47|d3dcompiler_47|Direct3D shader compiler|Games that compile shaders at start
+xact|xact|XACT / XAudio|Sound in older games
+physx|physx|PhysX (CPU)|Games using NVIDIA PhysX
+corefonts|corefonts|Microsoft core fonts|Arial, Times New Roman and other common fonts'
+
+winetricks_bin() {
+  local bin="$MACWINE_HOME/tools/winetricks-$WINETRICKS_VERSION"
+  if [ ! -x "$bin" ]; then
+    mkdir -p "$MACWINE_HOME/tools"
+    echo "Downloading winetricks $WINETRICKS_VERSION..." >&2
+    curl -fL --retry 3 -o "$bin.part" "$WINETRICKS_URL"
+    [ "$(shasum -a 256 "$bin.part" | cut -d' ' -f1)" = "$WINETRICKS_SHA256" ] || { rm -f "$bin.part"; die "winetricks checksum mismatch - download refused"; }
+    chmod +x "$bin.part"; mv "$bin.part" "$bin"
+  fi
+  echo "$bin"
+}
+
+account_json() { # store -> one JSON object for "accounts"
+  local s="$1" b user id persona key st msg conn=false full=false
+  b="$(store_bottle "$s")"
+  case "$s" in
+    steam)
+      if [ -z "$b" ]; then st=launcher-missing; msg="Steam is not installed in any bottle. Connect Steam to install it."
+      else
+        user="$(steam_user "$b")"; id="${user%%$'\t'*}"; persona="${user#*$'\t'}"
+        key="$(keychain_get steam-apikey)"
+        if [ -z "$id" ]; then st=needs-login; msg="Sign in to Steam in bottle '$b'."
+        else conn=true
+          if [ -z "$key" ] && [ -n "$(steam_cache_tsv "$b" | head -1)" ]; then st=ok; full=true; msg="Full library loaded from your Steam account."
+          elif [ -z "$key" ]; then st=needs-sync; msg="Signed in. Open Steam once so it can load your library."
+          elif [ -f "$ACCOUNTS/steam/owned.json" ]; then st=ok; full=true; msg="Full library loaded."
+          else st=needs-sync; msg="Key saved. Refresh to load the full library."; fi
+        fi
+      fi ;;
+    epic)
+      [ -f "$ACCOUNTS/epic/bottle" ] && b="$(cat "$ACCOUNTS/epic/bottle")"
+      if epic_signed_in; then conn=true; st=needs-sync; persona="$(epic_account_name)"; msg="Signed in. Refresh to load the full library."
+        if [ -f "$ACCOUNTS/epic/owned.ok" ]; then full=true; st=ok; msg="Full library loaded."; fi
+        [ -n "$b" ] || { st=needs-bottle; msg="Signed in. Choose a bottle for Epic games."; }
+      else st=needs-login; msg="Sign in with your Epic Games account."; fi ;;
+    gog)
+      [ -f "$ACCOUNTS/gog/bottle" ] && b="$(cat "$ACCOUNTS/gog/bottle")"
+      if gog_signed_in; then conn=true; st=needs-sync; persona="$(gog_account_name)"; msg="Signed in. Refresh to load the full library."
+        if [ -f "$ACCOUNTS/gog/owned.ok" ]; then full=true; st=ok; msg="Full library loaded."; fi
+        [ -n "$b" ] || { st=needs-bottle; msg="Signed in. Choose a bottle for GOG games."; }
+      else st=needs-login; msg="Sign in with your GOG account."; fi ;;
+    ubisoft)
+      if [ -z "$b" ]; then st=launcher-missing; msg="Connect Ubisoft to install Ubisoft Connect."
+      elif [ -n "$(ubisoft_owned_tsv "$b" | head -1)" ]; then conn=true; st=ok; full=true; msg="Library loaded from Ubisoft Connect."
+      else conn=true; st=needs-sync; msg="Sign in to Ubisoft Connect once so MacWine can read your library."; fi ;;
+  esac
+  "$JQ" -n --arg store "$s" --argjson connected "$conn" --arg accountName "${persona:-}" --arg bottle "$b" \
+    --argjson fullLibrary "$full" --arg status "$st" --arg message "$msg" \
+    '{store: $store, connected: $connected, accountName: (if $accountName=="" then null else $accountName end),
+      bottle: (if $bottle=="" then null else $bottle end), fullLibrary: $fullLibrary, status: $status, message: $message}'
+}
+
+library_json() { # store bottle
+  case "$1" in
+    steam) steam_library_json "$2" ;;
+    epic) epic_library_json "$2" ;;
+    gog) gog_library_json "$2" ;;
+    ubisoft) ubisoft_library_json "$2" ;;
+  esac
+}
+
+# --- downloadable runtime (release builds ship the app without it) ---
+runtime_installed_version() { # version of the runtime in use, "bundled" (inside this app), "legacy" or empty
+  if [ -f "$RUNTIME/lib/macwine/runtime-version" ]; then cat "$RUNTIME/lib/macwine/runtime-version"
+  elif [ -x "$WINE" ]; then
+    case "$(cd "$RUNTIME" && pwd -P)" in
+      "$(cd "$SELF_DIR" && pwd -P)/runtime"|"$(cd "$SELF_DIR/.." && pwd -P)/MacOS/runtime") echo bundled ;;
+      *) echo legacy ;;   # e.g. ~/MacWine/runtime from a developer build - never satisfies a pinned version
+    esac
+  fi
+}
+manifest_get() { "$JQ" -r ".$1 // empty" "$RUNTIME_MANIFEST" 2>/dev/null || true; }
+
+runtime_install() { # downloads, verifies and activates the runtime from runtime.json
+  local ver url sha size tmp got pct=-1 p dest
+  [ -f "$RUNTIME_MANIFEST" ] || die "no runtime manifest ($RUNTIME_MANIFEST) - this build bundles its runtime"
+  ver="$(manifest_get version)"; url="$(manifest_get url)"; sha="$(manifest_get sha256)"; size="$(manifest_get size)"
+  [ -n "$ver" ] && [ -n "$url" ] && [ -n "$sha" ] || die "invalid runtime manifest"
+  case "$url" in
+    https://*) ;;
+    file://*) [ "${MACWINE_DEV_ALLOW_FILE_URL:-0}" = 1 ] || die "runtime URL must be https" ;;  # local release testing only
+    *) die "runtime URL must be https" ;;
+  esac
+  dest="$RUNTIMES/$ver"
+  if [ -x "$dest/lib/wine/x86_64-unix/wine" ]; then ln -sfn "$ver" "$RUNTIMES/current"; return 0; fi
+  mkdir -p "$RUNTIMES"
+  tmp="$(mktemp -d "$RUNTIMES/.download.XXXXXX")"
+  curl -fsL --retry 3 -o "$tmp/runtime.tar.xz" "$url" &
+  local cpid=$!
+  while kill -0 "$cpid" 2>/dev/null; do
+    if [ -n "$size" ] && [ "$size" -gt 0 ] && [ -f "$tmp/runtime.tar.xz" ]; then
+      got="$(stat -f %z "$tmp/runtime.tar.xz")"; p=$(( got * 100 / size )); [ "$p" -gt 99 ] && p=99
+      if [ "$p" != "$pct" ]; then pct=$p; echo "progress $p" >&2; fi
+    fi
+    sleep 1
+  done
+  wait "$cpid" || { rm -rf "${tmp:?}"; die "runtime download failed"; }
+  echo "progress 100" >&2
+  [ "$(shasum -a 256 "$tmp/runtime.tar.xz" | cut -d' ' -f1)" = "$sha" ] || { rm -rf "${tmp:?}"; die "runtime checksum mismatch - download refused"; }
+  echo "extracting" >&2
+  mkdir -p "$tmp/x"
+  tar -xJf "$tmp/runtime.tar.xz" -C "$tmp/x" || { rm -rf "${tmp:?}"; die "runtime archive is damaged"; }
+  [ -x "$tmp/x/runtime/lib/wine/x86_64-unix/wine" ] || { rm -rf "${tmp:?}"; die "runtime archive has unexpected contents"; }
+  xattr -dr com.apple.quarantine "$tmp/x/runtime" 2>/dev/null || true
+  mv "$tmp/x/runtime" "$dest"
+  rm -rf "${tmp:?}"
+  ln -sfn "$ver" "$RUNTIMES/current"
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  runtime|""|-h|--help|help) ;;
+  *) [ -x "$WINE" ] || die "Wine runtime not found - run: macwine runtime install" ;;
+esac
+
+shift || true
+case "$cmd" in
+  runtime)
+    sub="${1:-status}"
+    req="$(manifest_get version)"; inst="$(runtime_installed_version)"
+    case "$sub" in
+      status)
+        up=false
+        # A pinned runtime (runtime.json) is satisfied only by exactly that version or by a runtime bundled in this app.
+        if [ -n "$inst" ] && { [ -z "$req" ] || [ "$inst" = "$req" ] || [ "$inst" = bundled ]; }; then up=true; fi
+        if [ "$JSON" = 1 ]; then
+          "$JQ" -n --arg i "$inst" --arg r "$req" --argjson u "$up" --arg p "$([ -x "$WINE" ] && echo "$RUNTIME")" \
+            '{installed: (if $i=="" then null else $i end), required: (if $r=="" then null else $r end), upToDate: $u, path: (if $p=="" then null else $p end)}'
+        else echo "installed: ${inst:-none}, required: ${req:-any}, up to date: $up"; fi ;;
+      install)
+        runtime_install
+        [ "$JSON" = 1 ] && "$JQ" -n --arg v "$(manifest_get version)" '{installed: $v}' || echo "Runtime $(manifest_get version) installed" ;;
+      *) die "usage: macwine runtime status|install" ;;
+    esac
+    ;;
+  create)
+    [ -n "${1:-}" ] || die "missing bottle name"
+    case "$1" in */*|.*) die "invalid bottle name: $1" ;; esac
+    [ ! -e "$BOTTLES/$1" ] || die "bottle '$1' already exists"
+    mkdir -p "$BOTTLES"
+    setup_env "$1"
+    [ "$JSON" = 1 ] || echo "Creating bottle '$1'..."
+    "$WINE" wineboot --init >/dev/null 2>&1
+    "$WINE" reg add 'HKCU\Software\Wine' /v Version /d win10 /f >/dev/null 2>&1
+    "$WINESERVER" -w
+    install_dxvk >/dev/null 2>&1
+    install_compat >/dev/null 2>&1
+    conf_set "$1" graphics dxvk; conf_set "$1" compat "$COMPAT_VERSION"
+    if [ "$JSON" = 1 ]; then printf '{"name":%s,"path":%s}\n' "$(json_str "$1")" "$(json_str "$WINEPREFIX")"
+    else echo "Done: $WINEPREFIX"; fi
+    ;;
+  list)
+    if [ "$JSON" = 1 ]; then
+      first=1; printf '['
+      for d in "$BOTTLES"/*/; do
+        [ -d "$d" ] || continue
+        b="$(basename "$d")"
+        [ "$first" = 1 ] || printf ','; first=0
+        if bottle_running "$b"; then r=true; else r=false; fi
+        printf '{"name":%s,"path":%s,"fps":%s,"graphics":%s,"windows":%s,"running":%s}' \
+          "$(json_str "$b")" "$(json_str "${d%/}")" "$(conf_get "$b" fps 0)" \
+          "$(json_str "$(conf_get "$b" graphics dxvk)")" "$(json_str "$(win_version "$b")")" "$r"
+      done
+      printf ']\n'
+    else
+      ls -1 "$BOTTLES" 2>/dev/null || true
+    fi
+    ;;
+  settings)
+    need_bottle "${1:-}"
+    if bottle_running "$1"; then r=true; else r=false; fi
+    if [ "$JSON" = 1 ]; then
+      printf '{"fps":%s,"graphics":%s,"windows":%s,"msync":true,"hud":%s,"running":%s}\n' \
+        "$(conf_get "$1" fps 0)" "$(json_str "$(conf_get "$1" graphics dxvk)")" \
+        "$(json_str "$(win_version "$1")")" "$([ "$(conf_get "$1" hud 0)" = 1 ] && echo true || echo false)" "$r"
+    else
+      echo "fps=$(conf_get "$1" fps 0)"; echo "graphics=$(conf_get "$1" graphics dxvk)"
+      echo "windows=$(win_version "$1")"; echo "hud=$(conf_get "$1" hud 0)"; echo "running=$r"
+    fi
+    ;;
+  set)
+    need_bottle "${1:-}"
+    b="$1"; key="${2:-}"; val="${3:-}"
+    [ -n "$key" ] && [ -n "$val" ] || die "usage: macwine set <bottle> <key> <value>"
+    case "$key" in
+      fps)  [[ "$val" =~ ^[0-9]+$ ]] || die "fps must be a number"; conf_set "$b" fps "$val"; rm -f "$BOTTLES/$b/macwine-fps" ;;
+      hud)  [[ "$val" =~ ^[01]$ ]] || die "hud must be 0 or 1"; conf_set "$b" hud "$val" ;;
+      log)  [[ "$val" =~ ^[01]$ ]] || die "log must be 0 or 1"; conf_set "$b" log "$val" ;;
+      graphics)
+        setup_env "$b"
+        case "$val" in
+          dxvk) conf_set "$b" graphics dxvk; install_dxvk >/dev/null 2>&1 ;;
+          wined3d) conf_set "$b" graphics wined3d; write_dll_overrides builtin >/dev/null 2>&1 ;;
+          d3dmetal)
+            d3dmetal_installed || die "D3DMetal is not installed (macwine d3dmetal import <Game Porting Toolkit .dmg>)"
+            write_dll_overrides builtin >/dev/null 2>&1; conf_set "$b" graphics d3dmetal ;;
+          *) die "graphics must be dxvk, wined3d or d3dmetal" ;;
+        esac ;;
+      windows)
+        case "$val" in win11|win10|win81|win8|win7) ;; *) die "windows must be one of: win11 win10 win81 win8 win7" ;; esac
+        setup_env "$b"; "$WINE" reg add 'HKCU\Software\Wine' /v Version /d "$val" /f >/dev/null 2>&1; "$WINESERVER" -w ;;
+      *) die "unknown key: $key (fps, graphics, windows, hud)" ;;
+    esac
+    [ "$JSON" = 1 ] || echo "$key=$val"
+    ;;
+  run)
+    need_bottle "${1:-}"; setup_env "$1"; b="$1"; shift
+    [ -n "${1:-}" ] || die "missing program to run"
+    ensure_dxvk "$b"; ensure_compat "$b"
+    wine_start "$@"
+    ;;
+  launch|install)
+    need_bottle "${1:-}"; setup_env "$1"; b="$1"
+    store="${2:-}"; id="${3:-}"
+    [ -n "$store" ] && [ -n "$id" ] || die "usage: macwine $cmd <bottle> <store> <id>"
+    ensure_dxvk "$b"; ensure_compat "$b"
+    case "$store" in
+      exe)
+        [ "$cmd" = launch ] || die "install is not supported for $store"
+        wine_start "$id" ;;
+      gog)
+        # Older shortcuts pass the game's .exe instead of the GOG product id
+        if ! [[ "$id" =~ ^[0-9]+$ ]]; then [ "$cmd" = launch ] || die "usage: macwine install <bottle> gog <product id>"; wine_start "$id"; fi
+        info="$(gog_info_file "$b" "$id")"
+        if [ "$cmd" = install ]; then
+          gog_signed_in || die "GOG is not connected (macwine connect gog)"
+          [ -z "$info" ] || die "this GOG game is already installed"
+          gd="$(gogdl_bin)"
+          mkdir -p "$ACCOUNTS/gog/logs" "$WINEPREFIX/drive_c/GOG Games"
+          log="$ACCOUNTS/gog/logs/install-$id.log"
+          set -- "$gd" --auth-config-path "$GOG_AUTH" download "$id" --platform windows --with-dlcs \
+            --path "$WINEPREFIX/drive_c/GOG Games" --support "$WINEPREFIX/drive_c/GOG Games/.support/$id"
+          [ "$JSON" = 1 ] && "$JQ" -n --arg l "$log" '{store: "gog", log: $l}'
+          if [ "$DETACH" = 1 ]; then nohup "$@" > "$log" 2>&1 & disown || true; exit 0; fi
+          exec "$@"
+        fi
+        [ -n "$info" ] || die "this GOG game is not installed in bottle $b"
+        gdir="$(dirname "$info")"
+        task="$("$JQ" -c '(.playTasks // []) | (map(select(.isPrimary == true and (.type // "FileTask") == "FileTask")) + map(select((.type // "FileTask") == "FileTask"))) | first // empty' "$info")"
+        [ -n "$task" ] || die "this GOG game has no launch task"
+        exe="$gdir/$(printf '%s' "$task" | "$JQ" -r '.path' | tr '\\' '/')"
+        wd="$(printf '%s' "$task" | "$JQ" -r '.workingDir // empty' | tr '\\' '/')"
+        [ -n "$wd" ] && wd="$gdir/$wd" || wd="$(dirname "$exe")"
+        [ -f "$exe" ] || die "the game's program was not found: $exe"
+        cd "$wd"
+        # shellcheck disable=SC2046
+        set -- "$WINE" "$exe" $(printf '%s' "$task" | "$JQ" -r '.arguments // empty')
+        if [ "$DETACH" = 1 ]; then nohup "$@" >/dev/null 2>&1 & disown || true; exit 0; fi
+        exec "$@" ;;
+      epic)
+        leg="$(legendary_bin)"
+        epic_signed_in || die "Epic is not connected (macwine connect epic)"
+        if [ "$cmd" = install ]; then
+          mkdir -p "$ACCOUNTS/epic/logs" "$WINEPREFIX/drive_c/Games"
+          log="$ACCOUNTS/epic/logs/install-$id.log"
+          [ "$JSON" = 1 ] && "$JQ" -n --arg l "$log" '{store: "epic", log: $l}'
+          if [ "$DETACH" = 1 ]; then
+            nohup "$leg" -y install "$id" --platform Windows --base-path "$WINEPREFIX/drive_c/Games" > "$log" 2>&1 &
+            disown || true; exit 0
+          fi
+          exec "$leg" -y install "$id" --platform Windows --base-path "$WINEPREFIX/drive_c/Games"
+        fi
+        if "$leg" list-installed --json 2>/dev/null | "$JQ" -e --arg id "$id" 'any(.[]; .app_name == $id)' >/dev/null; then
+          set -- "$leg" launch "$id" --wine "$WINE" --wine-prefix "$WINEPREFIX"
+          if [ "$DETACH" = 1 ]; then nohup "$@" >/dev/null 2>&1 & disown || true; exit 0; fi
+          exec "$@"
+        fi
+        setup_store "$b" epic
+        wine_start "$(store_exe epic)" "$(store_url "$cmd" epic "$id")" ;;
+      steam|ubisoft)
+        setup_store "$b" "$store"
+        if [ "$store" = steam ]; then wine_start "$(store_exe steam)" -silent "$(store_url "$cmd" steam "$id")"
+        else wine_start "$(store_exe "$store")" "$(store_url "$cmd" "$store" "$id")"; fi ;;
+      *) die "unknown store: $store" ;;
+    esac
+    ;;
+  setup-store|steam)
+    if [ "$cmd" = steam ]; then set -- "${1:-}" steam; fi
+    need_bottle "${1:-}"; setup_env "$1"; b="$1"; store="${2:-}"
+    [ -n "$store" ] || die "usage: macwine setup-store <bottle> steam|epic|gog|ubisoft"
+    ensure_dxvk "$b"; ensure_compat "$b"
+    setup_store "$b" "$store"
+    wine_start "$(store_exe "$store")"
+    ;;
+  open)
+    file="${1:-}"; b=""
+    [ -f "$file" ] || die "file not found: $file"
+    if [ "${2:-}" = --bottle ]; then b="${3:-}"; fi
+    if [ -z "$b" ]; then echo "macwine: choose a bottle (--bottle <name>)" >&2; exit 3; fi
+    need_bottle "$b"; setup_env "$b"; ensure_dxvk "$b"
+    case "$(printf '%s' "$file" | tr 'A-Z' 'a-z')" in
+      *.msi) wine_start msiexec /i "$("$WINE" winepath -w "$file" 2>/dev/null)" ;;
+      *)     wine_start "$file" ;;
+    esac
+    ;;
+  icon)
+    [ -f "${1:-}" ] && [ -n "${2:-}" ] || die "usage: macwine icon <program.exe> <output.png>"
+    extract_icon "$1" "$2" || die "no icon found in: $1"
+    if [ "$JSON" = 1 ]; then printf '{"png":%s}\n' "$(json_str "$2")"; else echo "$2"; fi
+    ;;
+  shortcut)
+    need_bottle "${1:-}"; b="$1"; store="${2:-}"; id="${3:-}"; shift 3 || true
+    name="" dest="$HOME/Applications" icon=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --name) name="${2:-}"; shift 2 ;;
+        --icon) icon="${2:-}"; shift 2 ;;
+        --dest) dest="${2:-}"; shift 2 ;;
+        *) die "unknown option: $1" ;;
+      esac
+    done
+    [ -n "$store" ] && [ -n "$id" ] && [ -n "$name" ] || die "usage: macwine shortcut <bottle> <store> <id> --name <name> [--dest <folder>] [--icon <image|exe>]"
+    case "$name" in */*) die "name must not contain /" ;; esac
+    WINEPREFIX="$BOTTLES/$b"
+    app="$dest/$name.app"
+    mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+    cli="$(app_cli_path)"
+    # Zastupce si MacWine.app dohleda pres bundle ID (funguje i po jejim presunuti); zalozne pevna cesta.
+    cat > "$app/Contents/MacOS/launcher" <<EOF
+#!/bin/bash
+# Zastupce MacWine: $name
+cli="\$(mdfind "kMDItemCFBundleIdentifier == '$APP_BUNDLE_ID'" 2>/dev/null | head -1)/Contents/Resources/macwine"
+[ -x "\$cli" ] || cli=$(printf '%q' "$cli")
+exec "\$cli" launch $(printf '%q %q %q' "$b" "$store" "$id") --detach
+EOF
+    chmod +x "$app/Contents/MacOS/launcher"
+    sid="$(printf '%s' "$b-$store-$id" | shasum | cut -c1-12)"
+    cat > "$app/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>$APP_BUNDLE_ID.shortcut.$sid</string>
+  <key>CFBundleName</key><string>$(printf '%s' "$name" | sed 's/&/\&amp;/g; s/</\&lt;/g')</string>
+  <key>CFBundleExecutable</key><string>launcher</string>
+  <key>CFBundleIconFile</key><string>icon</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.games</string>
+  <key>LSUIElement</key><true/>
+</dict></plist>
+EOF
+    # Ikona: --icon (obrazek nebo .exe), jinak ikona programu / launcheru obchodu
+    png="$(mktemp -t macwine).png"
+    case "$(printf '%s' "$icon" | tr 'A-Z' 'a-z')" in
+      "") iexe="$(store_icon_exe "$store" "$id")"; [ -f "$iexe" ] && extract_icon "$iexe" "$png" 2>/dev/null || rm -f "$png" ;;
+      *.exe|*.dll) extract_icon "$icon" "$png" 2>/dev/null || rm -f "$png" ;;
+      *) sips -s format png "$icon" --out "$png" >/dev/null 2>&1 || rm -f "$png" ;;
+    esac
+    if [ -s "$png" ]; then make_icns "$png" "$app/Contents/Resources/icon.icns"; fi
+    rm -f "$png"
+    touch "$app"
+    if [ "$JSON" = 1 ]; then printf '{"app":%s}\n' "$(json_str "$app")"; else echo "Shortcut: $app"; fi
+    ;;
+  accounts)
+    if [ "$JSON" = 1 ]; then
+      for s in $STORES; do account_json "$s"; done | "$JQ" -s '.'
+    else
+      for s in $STORES; do account_json "$s" | "$JQ" -r '"\(.store): \(.status) - \(.message)"'; done
+    fi
+    ;;
+  library)
+    store="${1:-}"; b=""
+    case "$store" in steam|epic|gog|ubisoft) ;; *) die "usage: macwine library steam|epic|gog|ubisoft [--bottle <b>]" ;; esac
+    if [ "${2:-}" = --bottle ]; then b="${3:-}"; else b="$(store_bottle "$store")"; fi
+    if [ -z "$b" ] && [ "$store" = epic ] && [ -f "$ACCOUNTS/epic/bottle" ]; then b="$(cat "$ACCOUNTS/epic/bottle")"; fi
+    if [ -z "$b" ]; then out='[]'; else need_bottle "$b"; WINEPREFIX="$BOTTLES/$b"; out="$(library_json "$store" "$b")"; fi
+    if [ "$JSON" = 1 ]; then printf '%s\n' "$out"
+    else printf '%s' "$out" | "$JQ" -r '.[] | "\(if .installed then "[installed]" else "[owned]    " end) \(.name) (\(.id))"'; fi
+    ;;
+  connect)
+    # Every store has its own bottle named after the store (created on first connect); --bottle overrides it.
+    store="${1:-}"; shift || true
+    case "$store" in steam|epic|gog|ubisoft) ;; *) die "usage: macwine connect steam|epic|gog|ubisoft [--bottle <b>] [--code-stdin]" ;; esac
+    b="$store"; codein=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --bottle) b="${2:-}"; shift 2 || true ;;
+        --code-stdin) codein=1; shift ;;
+        *) die "unknown option: $1" ;;
+      esac
+    done
+    case "$b" in ""|*/*|.*) die "invalid bottle name: $b" ;; esac
+    if [ ! -d "$BOTTLES/$b" ]; then
+      [ "$JSON" = 1 ] || echo "Creating bottle '$b' for $store..." >&2
+      MACWINE_LOG=0 "$SELF" create "$b" --json >/dev/null || die "could not create bottle '$b'"
+    fi
+    mkdir -p "$ACCOUNTS/$store"; echo "$b" > "$ACCOUNTS/$store/bottle"
+    if [ "$store" = gog ] && [ "$codein" = 1 ]; then
+      gogdl_bin >/dev/null
+      gog_login
+      [ "$JSON" = 1 ] && "$JQ" -n --arg n "$(gog_account_name)" '{store: "gog", connected: true, accountName: (if $n=="" then null else $n end)}' || echo "GOG: signed in as $(gog_account_name)"
+      exit 0
+    fi
+    if [ "$store" = epic ] && [ "$codein" = 1 ]; then
+      # The one-time authorization code is read from stdin and handed to Legendary on its stdin -
+      # never as a process argument. BROWSER=true stops Legendary from opening a browser itself.
+      # Accepts the bare code, the whole JSON page Epic shows, or the redirect URL (...?code=...)
+      code="$(head -c 8192 | tr -d '[:space:]')"
+      if [[ "$code" =~ \"authorizationCode\":\"([0-9a-fA-F]+)\" ]] || [[ "$code" =~ [?\&]code=([0-9a-fA-F]+) ]]; then
+        code="${BASH_REMATCH[1]}"
+      fi
+      code="$(printf '%s' "$code" | tr -d '"')"
+      [[ "$code" =~ ^[0-9a-fA-F]{20,64}$ ]] || die "Epic: this does not look like an authorization code"
+      leg="$(legendary_bin)"
+      printf '%s\n' "$code" | BROWSER=/usr/bin/true "$leg" auth --disable-webview >/dev/null 2>&1 \
+        || { unset code; die "Epic sign-in failed (the code is valid only once and for a short time)"; }
+      unset code
+      epic_signed_in || die "Epic sign-in failed"
+      [ "$JSON" = 1 ] && "$JQ" -n --arg n "$(epic_account_name)" '{store: "epic", connected: true, accountName: $n}' || echo "Epic: signed in as $(epic_account_name)"
+      exit 0
+    fi
+    [ "$codein" = 0 ] || die "--code-stdin is only for epic and gog"
+    if [ "$store" = epic ]; then
+      # Epic: user signs in on epicgames.com (opened by the app), the page shows a one-time authorization code.
+      legendary_bin >/dev/null
+      [ "$JSON" = 1 ] && "$JQ" -n --arg u "$EPIC_LOGIN_URL" '{store: "epic", loginURL: $u, next: "macwine connect epic --code-stdin"}' \
+        || echo "Sign in at $EPIC_LOGIN_URL, then run: macwine connect epic --code-stdin  (and paste the authorizationCode)"
+      exit 0
+    fi
+    if [ "$store" = gog ]; then
+      # GOG: user signs in on gog.com; the final address (embed.gog.com/on_login_success?code=...) carries a one-time code.
+      gogdl_bin >/dev/null
+      [ "$JSON" = 1 ] && "$JQ" -n --arg u "$GOG_LOGIN_URL" '{store: "gog", loginURL: $u, next: "macwine connect gog --code-stdin"}' \
+        || echo "Sign in at $GOG_LOGIN_URL, then run: macwine connect gog --code-stdin  (and paste the address of the final page)"
+      exit 0
+    fi
+    # Sign-in always happens in the store's own launcher - MacWine never sees the password.
+    if [ "$DETACH" = 1 ]; then exec "$SELF" setup-store "$b" "$store" --detach; fi
+    exec "$SELF" setup-store "$b" "$store"
+    ;;
+  sync)
+    store="${1:-}"; [ -n "$store" ] || die "usage: macwine sync <store>"
+    b="$(store_bottle "$store")"; [ -n "$b" ] || die "$store is not connected"
+    case "$store" in
+      steam)
+        steam_sync_or_die "$b"
+        [ "$JSON" = 1 ] && "$JQ" '{store: "steam", owned: length}' "$ACCOUNTS/steam/owned.json" || echo "Steam: $("$JQ" length "$ACCOUNTS/steam/owned.json") owned games" ;;
+      gog)
+        n="$(gog_library_json "$b" | "$JQ" length)"
+        [ "$JSON" = 1 ] && echo "{\"store\":\"gog\",\"owned\":$n}" || echo "GOG: $n games" ;;
+      *) [ "$JSON" = 1 ] && echo "{\"store\":\"$store\",\"owned\":null}" || echo "$store: only installed games are available" ;;
+    esac
+    ;;
+  disconnect)
+    store="${1:-}"
+    case "$store" in steam|epic|gog|ubisoft) ;; *) die "usage: macwine disconnect steam|epic|gog|ubisoft" ;; esac
+    rm -f "${ACCOUNTS:?}/$store/bottle" "${ACCOUNTS:?}/$store/owned.json"
+    [ "$store" = steam ] && security delete-generic-password -s MacWine -a steam-apikey >/dev/null 2>&1 || true
+    if [ "$store" = epic ] && epic_signed_in; then "$(legendary_bin)" auth --delete >/dev/null 2>&1 || true; fi
+    [ "$store" = gog ] && rm -f "${ACCOUNTS:?}/gog/auth.json" "${ACCOUNTS:?}/gog/user.json" "${ACCOUNTS:?}/gog/owned.ok"
+    [ "$JSON" = 1 ] && echo "{\"store\":\"$store\",\"connected\":false}" || echo "$store disconnected (local link only)"
+    ;;
+  set-key)
+    [ "${1:-}" = steam ] || die "usage: macwine set-key steam   (the key is read from stdin)"
+    if [ -t 0 ]; then printf 'Steam Web API key (https://steamcommunity.com/dev/apikey): ' >&2; read -rs key; echo >&2
+    else read -r key; fi
+    [[ "$key" =~ ^[0-9A-Fa-f]{32}$ ]] || die "this does not look like a Steam Web API key (32 hex characters)"
+    # Passed to "security -i" on stdin so the key never appears in the process list.
+    printf 'add-generic-password -U -s MacWine -a steam-apikey -w %s\n' "$key" | security -i >/dev/null
+    unset key
+    rm -f "${ACCOUNTS:?}/steam/owned.json"
+    [ "$JSON" = 1 ] && echo '{"store":"steam","key":true}' || echo "Steam Web API key saved to the Keychain"
+    ;;
+  d3dmetal)
+    sub="${1:-status}"
+    case "$sub" in
+      status)
+        if d3dmetal_installed; then inst=true; else inst=false; fi
+        if [ "$JSON" = 1 ]; then "$JQ" -n --argjson i "$inst" --arg s "$(cat "$D3DM_GPTK/source" 2>/dev/null)" '{installed: $i, source: (if $s=="" then null else $s end)}'
+        else echo "D3DMetal installed: $inst"; fi ;;
+      import)
+        src="${2:-}"; [ -e "$src" ] || die "usage: macwine d3dmetal import <Game Porting Toolkit .dmg or folder>"
+        mnt=(); search=("$src")
+        cleanup_mounts() { local m; for m in ${mnt[@]+"${mnt[@]}"}; do hdiutil detach -quiet "$m" 2>/dev/null || true; done; }
+        trap cleanup_mounts EXIT
+        found=""
+        # The toolkit .dmg may contain another .dmg ("Evaluation environment for Windows games")
+        for _ in 1 2 3; do
+          next=()
+          for item in "${search[@]}"; do
+            if [ -f "$item" ] && [[ "$item" == *.dmg ]]; then
+              m="$(mktemp -d)"; hdiutil attach -nobrowse -readonly -quiet -mountpoint "$m" "$item" || die "cannot open $item"
+              mnt+=("$m"); item="$m"
+            fi
+            [ -d "$item" ] || continue
+            lib="$(find "$item" -maxdepth 6 -name libd3dshared.dylib -path '*/external/*' 2>/dev/null | head -1)"
+            if [ -n "$lib" ]; then found="$(dirname "$(dirname "$lib")")"; break 2; fi
+            while IFS= read -r d; do next+=("$d"); done < <(find "$item" -maxdepth 3 -name '*.dmg' 2>/dev/null)
+          done
+          [ ${#next[@]} -gt 0 ] || break
+          search=("${next[@]}")
+        done
+        [ -n "$found" ] && [ -f "$found/wine/x86_64-unix/d3d12.so" ] || die "D3DMetal was not found in $src (expected redist/lib/external and redist/lib/wine)"
+        rm -rf "${D3DM_DIR:?}/.gptk.tmp"; mkdir -p "$D3DM_DIR/.gptk.tmp"
+        ditto "$found/external" "$D3DM_DIR/.gptk.tmp/external"
+        ditto "$found/wine" "$D3DM_DIR/.gptk.tmp/wine"
+        echo "$(basename "$src")" > "$D3DM_DIR/.gptk.tmp/source"
+        rm -rf "${D3DM_GPTK:?}"; mv "$D3DM_DIR/.gptk.tmp" "$D3DM_GPTK"
+        xattr -dr com.apple.quarantine "$D3DM_GPTK" 2>/dev/null || true
+        [ "$JSON" = 1 ] && echo '{"installed":true}' || echo "D3DMetal imported. Enable it per bottle: macwine set <bottle> graphics d3dmetal" ;;
+      *) die "usage: macwine d3dmetal status | import <Game Porting Toolkit .dmg or folder>" ;;
+    esac
+    ;;
+  components)
+    sub="${1:-list}"
+    case "$sub" in
+      list)
+        if [ "$JSON" = 1 ]; then
+          printf '%s\n' "$COMPONENTS" | "$JQ" -R -s '[split("\n")[] | select(length>0) | split("|") | {id: .[0], name: .[2], description: .[3]}]'
+        else printf '%s\n' "$COMPONENTS" | awk -F'|' '{printf "%-16s %s - %s\n", $1, $3, $4}'; fi ;;
+      install)
+        need_bottle "${2:-}"; b="$2"; shift 2
+        [ $# -gt 0 ] || die "usage: macwine components install <bottle> <component...>"
+        verbs=()
+        for c in "$@"; do
+          v="$(printf '%s\n' "$COMPONENTS" | awk -F'|' -v id="$c" '$1==id {print $2}')"
+          [ -n "$v" ] || die "unknown component: $c (see: macwine components list)"
+          verbs+=("$v")
+        done
+        setup_env "$b"; wt="$(winetricks_bin)"
+        mkdir -p "$MACWINE_HOME/logs"; log="$MACWINE_HOME/logs/components-$b.log"
+        export WINE WINESERVER WINEPREFIX PATH="$TOOLS:$PATH" W_OPT_UNATTENDED=1
+        [ "$JSON" = 1 ] && "$JQ" -n --arg l "$log" '{log: $l}'
+        if [ "$DETACH" = 1 ]; then nohup "$wt" -q "${verbs[@]}" > "$log" 2>&1 & disown || true; exit 0; fi
+        "$wt" -q "${verbs[@]}" 2>&1 | tee "$log" >&2
+        "$WINESERVER" -w ;;
+      *) die "usage: macwine components list | install <bottle> <component...>" ;;
+    esac
+    ;;
+  cfg)
+    need_bottle "${1:-}"; setup_env "$1"
+    wine_start winecfg
+    ;;
+  kill)
+    need_bottle "${1:-}"; setup_env "$1"
+    "$WINESERVER" -k 2>/dev/null || true
+    ;;
+  version)
+    wv="$("$WINE" --version 2>/dev/null || echo unknown)"
+    dv="$(strings -a "$RUNTIME/lib/dxvk/x86_64-windows/d3d11.dll" 2>/dev/null | grep -E '^v[0-9]+\.[0-9]+' | head -1)" || true
+    dv="${dv:-unknown}"
+    mv="$(cat "$RUNTIME/lib/macwine/moltenvk-version" 2>/dev/null || echo unknown)"
+    mw="$(cat "$RUNTIME/lib/macwine/version" 2>/dev/null || echo dev)"
+    if [ "$JSON" = 1 ]; then
+      printf '{"macwine":%s,"wine":%s,"dxvk":%s,"moltenvk":%s}\n' "$(json_str "$mw")" "$(json_str "${wv#wine-}")" "$(json_str "${dv#v}")" "$(json_str "$mv")"
+    else echo "MacWine $mw, Wine ${wv#wine-}, DXVK ${dv#v}, MoltenVK $mv"; fi
+    ;;
+  dxvk) # znovu nainstaluje DXVK a nastaveni registru do bottlu
+    need_bottle "${1:-}"; setup_env "$1"
+    install_dxvk
+    conf_set "$1" graphics dxvk
+    echo "DXVK installed in bottle '$1'"
+    ;;
+  compat) # zapise pravidla kompatibility do bottlu
+    need_bottle "${1:-}"; setup_env "$1"
+    install_compat
+    echo "Compatibility rules written to bottle '$1'"
+    ;;
+  fps) # puvodni prikaz, ekvivalent: macwine set <bottle> fps <n>
+    exec "$SELF" set "${1:-}" fps "${2:-}"
+    ;;
+  *)
+    sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'
+    [ -z "$cmd" ] || exit 1
+    ;;
+esac

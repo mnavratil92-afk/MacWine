@@ -1,0 +1,12 @@
+# Build output
+app/.build/
+.build/
+*.o
+# Prebuilt helper binaries (built by tools/build-tools.sh)
+tools/exeicon
+tools/steamappinfo
+tools/ubiconfig
+# Local collaboration notes and logs
+.collab/
+*.log
+.DS_Store
