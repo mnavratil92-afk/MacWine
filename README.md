@@ -1,131 +1,127 @@
 # MacWine
 
-Experimentální prostředí pro Windows aplikace na Apple Silicon: Wine ze zdrojů CrossOveru 26.3.0, DXVK (větev CodeWeavers 1.10.3) a MoltenVK. Aktuální vývoj probíhá na M1 Pro s macOS 27. Unixová část Wine je x86_64 a běží přes Rosettu; WoW64 zajišťuje 32bitové Windows aplikace.
+Run Windows games and apps on Apple Silicon Macs — with your Steam, Epic Games, GOG and Ubisoft libraries in one place.
 
-## Stav
+MacWine is a free, open-source macOS app built on [Wine](https://www.winehq.org), [DXVK](https://github.com/doitsujin/dxvk) and [MoltenVK](https://github.com/KhronosGroup/MoltenVK). DirectX 9–11 games are translated to Vulkan and then to Metal; the Windows part runs under Rosetta 2.
 
-Podle předání od Clauda uživatel při ručním testu 11. října 2026 potvrdil GTA V Legacy při limitu 60 FPS, zatížení GPU přibližně 60–70 % a bez zamrzání během testu. Fungující konfigurace kombinuje GCC 13.4, upravené výchozí hodnoty MoltenVK, údaj SDK 15.1 v binárkách a okno bez okrajů. Délka testu nebyla zaznamenána a vliv jednotlivých změn nebyl ověřen odděleně. Steam a Rockstar Launcher se vykreslují. Projekt není hotová náhrada všech funkcí CrossOveru.
+> **Status: early preview.** Many games work, many do not. Check the community ratings in the app before you install a large game.
 
-## Předpoklady
+## Features
 
-- Apple Silicon, Rosetta a plný Xcode; skript MoltenVK standardně používá `/Applications/Xcode.app/Contents/Developer` (lze změnit `DEVELOPER_DIR`).
-- Homebrew v `/opt/homebrew`. Skripty používají zejména CMake, Ninja, Meson, pkg-config, autoconf/automake/libtool, Bison, Flex, LLVM/LLD a knihovny GMP, MPFR, MPC, ISL. Nativní nástroje Wine potřebují také dostupný FreeType. Toto je seznam požadavků současných skriptů, nikoli ověřený instalátor pro čistý Mac.
-- Internet pro stažení překladačů a dalších závislostí; dostatek místa pro zdroje a několik souběžných sestavení.
-- MoltenVK sestavte před Wine podle postupu níže: konfigurace Wine ji pak najde v `$MACWINE_DEST/lib/libMoltenVK.dylib`. Cestu lze přepsat přes `MOLTENVK_DYLIB`.
+- **Your store libraries in one app.** Sign in once and MacWine shows every game you own; games that are not installed yet are shown in gray.
+  - **Steam** – full library; games install and run through the Steam client.
+  - **Epic Games** – sign in inside MacWine; games download directly (no Epic launcher), via [Legendary](https://github.com/legendary-gl/legendary).
+  - **GOG** – sign in inside MacWine; DRM-free games download directly (no GOG Galaxy), via [gogdl](https://github.com/Heroic-Games-Launcher/heroic-gogdl).
+  - **Ubisoft Connect** – sign in once in Ubisoft Connect; MacWine then shows your library. Ubisoft games download and start through Ubisoft Connect.
+- **One Windows environment ("bottle") per store**, created automatically, plus your own bottles for any `.exe` or `.msi`. Double-click Windows installers in Finder to open them in MacWine.
+- **Game shortcuts** as Mac apps (Dock, Launchpad, Desktop), with the game's icon or your own image.
+- **Community compatibility ratings** (0–5 stars) shared by all MacWine users through GitHub Discussions.
+- **Windows components** (Visual C++, .NET, DirectX libraries, fonts…) installable per bottle.
+- **Performance settings** per bottle: FPS limit, performance HUD, graphics backend.
+- **Automatic updates** (Sparkle).
 
-## Příprava zdrojů
+MacWine never asks for your store passwords: you sign in on the store's own web page or in its own launcher. Sign-in tokens stay on your Mac.
 
-Příkazy spouštějte z této složky `macwine`. Zvolte **nový, dosud neexistující** adresář s existujícím rodičem. Následující příklad používá oddělený build i runtime:
+## Requirements
 
-```bash
-export MACWINE_BUILD="$HOME/macwine-build-fresh"
-export MACWINE_HOME="$HOME/MacWine-fresh"
-export MACWINE_DEST="$MACWINE_HOME/runtime"
-./prepare-sources.sh "$MACWINE_BUILD"
-```
+- A Mac with Apple Silicon (M1 or newer)
+- macOS 13 Ventura or newer, Rosetta 2
+- Enough disk space for your games
 
-Případně použijte již stažený archiv:
+## Install
 
-```bash
-./prepare-sources.sh "$MACWINE_BUILD" \
-  "$HOME/macwine-build/crossover-sources-26.3.0.tar.gz"
-```
+Download the latest `MacWine.zip` from [Releases](../../releases), unzip it and move **MacWine.app** to *Applications*. On first launch MacWine downloads its Windows runtime (about 85 MB).
 
-Jde o dvě alternativy; druhý příkaz nespouštějte do cíle vytvořeného prvním. Skript odmítá každý existující cíl, ověřuje SHA-256 archivu a aplikuje všechny `patches/*.patch` v abecedním pořadí bez fuzzy shody. Předpona názvu vybírá kořen `sources/wine`, `sources/dxvk` nebo `sources/moltenvk`; neznámá předpona je chyba. Neúspěšná příprava uklidí pracovní data, může ponechat prázdný cílový adresář.
+MacWine is not notarized by Apple yet. The first time, right-click the app and choose **Open**.
 
-Archiv zůstane v kořeni build adresáře, protože jej znovu čte `build-moltenvk.sh`. Soubor `prepare-sources.manifest` zaznamenává otisk archivu a aplikovaných patchů. Použitý SHA-256 je otisk lokálního archivu použitého při vývoji, nikoli podpis vydavatele. Příprava zdrojů je opakovatelná; celý výsledný build zatím není garantován jako bitově reprodukovatelný.
+## Tips
 
-## Sestavení
+- **GTA V (Legacy):** use *Windowed Borderless* instead of exclusive fullscreen and a 60 FPS limit. Story mode works; online modes that need BattlEye are not supported.
+- **Games that do not start:** try *Windows components* (Visual C++ 2015–2022 first) and check the community ratings and reports for the game.
+- **DirectX 12** games need Apple's D3DMetal from the Game Porting Toolkit, which MacWine cannot redistribute. You can import your own copy (`macwine d3dmetal import <toolkit .dmg>`); support is experimental.
+- **Anti-cheat** (BattlEye, Easy Anti-Cheat, Vanguard…) usually blocks Wine. Those games will not run.
 
-Doporučené pořadí připraví vlastní MoltenVK ještě před konfigurací Wine:
+## Rate a game
 
-```bash
-./build-toolchain.sh
-./build-deps.sh
-./build-moltenvk.sh
-./build-wine.sh
-./build-dxvk.sh
-./package-runtime.sh
-```
+Open a game in MacWine → **Rate This Game…** → pick 0–5 stars → **Continue on GitHub**. The report is pre-filled; add a note and post it. Ratings are collected every hour and appear in the app for everyone. A free GitHub account is needed to post; reading ratings needs nothing.
 
-Pokud konfigurační knihovna MoltenVK chybí, `build-wine.sh` má záložní cestu do `~/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/lib64/`; při doporučeném postupu není potřeba.
-
-Význam jednotlivých kroků:
-
-1. **toolchain**: binutils 2.41, GCC 13.4.0 a mingw-w64 11.0.1 pro x86_64 a i686; CRT `msvcrt`, vlákna POSIX. Skript používá systémovou zlib a samostatný sysroot pro každý cíl. Podle zjištění při vývoji používá CodeWeavers GCC 13.2.0; zde byla zvolena 13.4.0 kvůli problému se sestavením 13.2.0 s libc++ z Xcode 27.
-2. **deps**: x86_64 FreeType, GMP, Nettle a GnuTLS. Nettle 3.10 se stahuje samostatně, protože zdrojový balík CodeWeavers postrádá potřebný `Makefile.in`.
-3. **moltenvk**: používá SPIRV-Cross z archivu CodeWeavers; další závislosti řeší `fetchDependencies`. Skript upravuje cílovou verzi macOS v projektech pro Xcode 27.
-4. **wine**: nejdříve nativní nástroje ARM64, potom x86_64 Wine s 32/64bitovým WoW64. Windows část používá `-std=gnu17` a vlastní GCC 13.
-5. **dxvk**: sestaví obě architektury, odstraní ladicí symboly a instaluje D3D9–11 DLL. `dxgi.dll` se používá z Wine.
-6. **package-runtime**: zkopíruje podpůrné knihovny do runtime, upraví jejich odkazy a lokálně je podepíše. Navíc pomocí `xcrun vtool` nastavuje údaj SDK na 15.1 u Wine loaderu, wineserveru, unixových `.so` a MoltenVK a znovu je lokálně podepisuje. Minimální verzi macOS zachovává; nejde o nové přeložení proti SDK 15.1. Cílem této změny je sladění chování kompatibility macOS se sestavením CrossOveru při vykreslování; samostatný přínos nebyl izolovaným testem potvrzen. Nevytváří samo o sobě instalační balíček ani aplikaci `.app`.
-
-Skripty uchovávají konfiguraci a značky dokončených kroků v `obj/`. Změna překladače či konfiguračních voleb se proto nemusí projevit při pouhém opakovaném spuštění. Pro čisté ověření použijte nový build adresář. Do právě běžícího sestavení nezasahujte.
-
-## Spouštěč
-
-Na vývojovém Macu je runtime fyzicky v `~/Applications/MacWine.app/Contents/MacOS/runtime` a `~/MacWine/runtime` je symbolický odkaz na něj. Balíček `MacWine.app` byl vytvořen ručně; obsahuje `Info.plist` a spouštěcí skript `Contents/MacOS/MacWine`, který volá `macwine steam gta`. Umístění runtime v balíčku slouží k přiřazení procesů Wine k aplikaci v systému. Sestavovací skripty tento balíček nezakládají.
-
-Spouštěč očekává runtime v `$MACWINE_HOME/runtime`; výchozí `MACWINE_HOME` je `~/MacWine`. `MACWINE_DEST` ovlivňuje sestavovací skripty, nikoli umístění runtime ve spouštěči. Při vlastním umístění musí obě hodnoty odpovídat.
-
-```bash
-./macwine create hry
-./macwine steam hry
-./macwine run hry "/absolutni/cesta/program.exe"
-```
-
-Bottle je samostatné prostředí Windows uložené v `$MACWINE_HOME/bottles/<název>`. Používejte jednoduché názvy bez lomítek.
-
-| Příkaz | Účel |
+| Stars | Meaning |
 | --- | --- |
-| `create <bottle>` | Vytvoří Windows 10 bottle, zkopíruje DXVK a zapíše kompatibilitu. |
-| `run <bottle> <program.exe> [argumenty…]` | Spustí program; doporučena absolutní cesta. |
-| `steam <bottle>` | Při prvním použití stáhne a nainstaluje Steam, pak jej spustí. |
-| `cfg <bottle>` | Otevře winecfg. |
-| `kill <bottle>` | Ukončí všechny Wine procesy daného bottlu. |
-| `fps <bottle> <n>` | Uloží trvalý limit FPS do `<bottle>/macwine-fps`; `0` ruší tento limit. Platí při dalším spuštění hry. |
-| `list` | Vypíše existující bottles. |
-| `dxvk <bottle>` | Znovu zkopíruje DXVK DLL do bottlu a nastaví registry. |
-| `compat <bottle>` | Znovu zapíše pravidla kompatibility. |
+| 0 | Does not start |
+| 1 | Starts, but is not playable |
+| 2 | Playable with major problems |
+| 3 | Playable with some problems |
+| 4 | Works well, minor issues |
+| 5 | Works perfectly |
 
-Při `run` a `steam` spouštěč porovnává 64bitovou `d3d11.dll` s vybraným zdrojem DXVK. Při rozdílu provede aktualizaci bottlu a obnoví DXVK automaticky, takže po běžné aktualizaci runtime není nutné ručně volat `./macwine dxvk hry`. Tento příkaz zůstává dostupný pro vynucené obnovení všech DXVK DLL. Změněná pravidla registru se aplikují přes `./macwine compat hry`. Před těmito změnami ukončete programy daného bottlu.
+## Command line
 
-## Nastavení a diagnostika
+The app is a front end for the `macwine` command line tool (inside the app: `MacWine.app/Contents/Resources/macwine`).
 
-| Proměnná | Význam |
+```bash
+macwine create mygames                       # new bottle
+macwine run mygames "/path/to/setup.exe"     # run a program
+macwine connect gog                          # connect a store (creates the "gog" bottle)
+macwine library epic --json                  # owned + installed games
+macwine install gog gog 1207658693           # install a game
+macwine set mygames fps 60                   # FPS limit (0 = off)
+macwine components install mygames vcrun2022
+macwine kill mygames                         # stop everything in a bottle
+```
+
+Run `macwine` without arguments for the full list. Useful environment variables:
+
+| Variable | Meaning |
 | --- | --- |
-| `MACWINE_BUILD` | Sestavovací adresář; výchozí `~/macwine-build`. |
-| `MACWINE_DEST` | Cílový runtime sestavení; výchozí `~/MacWine/runtime`. |
-| `MACWINE_HOME` | Domov spouštěče s runtime, bottles a logy. |
-| `MACWINE_LOG=1` | Zapne diagnostiku Wine a DXVK v `$MACWINE_HOME/logs/<bottle>-<čas>/`. |
-| `MACWINE_HUD=1` | Zapne DXVK HUD s FPS, časy snímků, zatížením GPU a indikátorem překladu shaderů. |
-| `MACWINE_DXVK_DIR` | Alternativní zdroj DLL pro instalaci i automatickou kontrolu při `run`/`steam`; obsahuje `x86_64-windows` a `i386-windows`. |
-| `MACWINE_FPS=<n>` | Jednorázový limit FPS, který má přednost před uloženým nastavením bottlu; předává se přes `DXVK_FRAME_RATE`. |
-| `MACWINE_MVK_DIR` | Přidá složku s alternativní `libMoltenVK.dylib` na začátek vyhledávací cesty při běhu. |
-| `MOLTENVK_DYLIB` | Cesta ke knihovně pro konfiguraci Wine při sestavení. |
+| `MACWINE_LOG=1` | Wine and DXVK logs in `~/MacWine/logs/<bottle>-<time>/` |
+| `MACWINE_HUD=1` | DXVK HUD (FPS, frame times, GPU load) |
+| `MACWINE_FPS=<n>` | One-off FPS limit |
+| `MACWINE_HOME` | Data folder (default `~/MacWine`: bottles, accounts, logs) |
+
+## Building from source
+
+Requirements: Apple Silicon, full Xcode, Homebrew in `/opt/homebrew` with CMake, Ninja, Meson, pkg-config, autoconf/automake/libtool, Bison, Flex, LLVM/LLD, GMP, MPFR, MPC and ISL.
 
 ```bash
-MACWINE_LOG=1 MACWINE_HUD=1 ./macwine steam hry
+export MACWINE_BUILD="$HOME/macwine-build"
+./prepare-sources.sh "$MACWINE_BUILD"   # downloads the Wine source archive, verifies it, applies patches/
+./build-toolchain.sh                   # binutils 2.41, GCC 13.4, mingw-w64 11 (x86_64 + i686)
+./build-deps.sh                        # FreeType, GMP, Nettle, GnuTLS (x86_64)
+./build-moltenvk.sh                    # MoltenVK with MacWine's defaults
+./build-wine.sh                        # Wine (x86_64, WoW64) + native build tools
+./build-dxvk.sh                        # DXVK, 32 and 64 bit
+tools/build-tools.sh                   # small native helpers (icons, store caches)
+./package-runtime.sh                   # bundles libraries, fixes load paths, signs locally
+./package-app.sh --install             # builds MacWine.app into ~/Applications
 ```
 
-Spouštěč zapíná `WINEMSYNC=1` a standardně `ROSETTA_ADVERTISE_AVX=1`. Bez diagnostického režimu vypíná běžné logy Wine a DXVK. `MACWINE_LOG=1` nejprve vypíše umístění logů na obrazovku a poté přesměruje standardní chybový výstup do `wine.log`.
+Each script keeps its state in `$MACWINE_BUILD/obj`; use a fresh build folder for a clean build. Wine is built from the Wine source archive published by CodeWeavers (see `prepare-sources.sh`), with MacWine's patches applied:
 
-## Doporučené nastavení GTA V Legacy
+- `wine-macwine-compat.patch` – per-program compatibility rules read from `HKCU\Software\MacWine\Compat` (extra arguments for Chromium-based launchers such as Steam, Rockstar and Ubisoft Connect, and similar fixes).
+- `wine-macwine-username.patch` – the Windows user is always called `macwine`, so bottles can move between Macs.
+- `moltenvk-defaults.patch` – MoltenVK defaults tuned for games under Wine.
+- `dxvk-mingw14.patch` – builds DXVK with the mingw-w64 toolchain above.
 
-Použijte **okno bez okrajů** místo exkluzivního fullscreenu. Podle diagnostiky předané Claudem se zamrzání objevovalo při přepínání režimu displeje v exkluzivním fullscreenu. V testovaném `settings.xml` bylo `Windowed=2`, `VSync=0` a rozlišení 2056×1329; na jiném displeji zvolte jeho odpovídající rozlišení.
+Releases: `MACWINE_RELEASE_REPO=<owner>/<repo> ./release.sh <version>` builds the app, the runtime archive and a signed Sparkle appcast.
 
-```bash
-./macwine fps gta 60
-MACWINE_LOG=1 MACWINE_HUD=1 ./macwine steam gta
-```
+## Project layout
 
-Tento příklad předpokládá existující bottle `gta`. Pro jednorázovou změnu použijte například `MACWINE_FPS=60 ./macwine steam gta`. Doporučení vychází z testu GTA V Legacy na tomto Macu, nikoli z ověření všech her.
+| Path | Contents |
+| --- | --- |
+| `macwine` | Command line tool (bottles, stores, games, settings) |
+| `app/` | SwiftUI app |
+| `build-*.sh`, `prepare-sources.sh` | Runtime build |
+| `package-*.sh`, `release.sh` | Packaging, releases, updates |
+| `patches/` | Patches for Wine, DXVK and MoltenVK |
+| `tools/` | Native helpers: `.exe` icons, Steam/Ubisoft cache readers, app icon |
+| `.github/` | Ratings aggregation, sponsorship |
 
-## Záplaty a kompatibilita
+## Support the project
 
-- `wine-macwine-compat.patch` je vlastní otevřená implementace vybraných pravidel pro Steam, Rockstar a GTA, obdobná účelu `cxcompatdb.so`; projekt nepoužívá ani nedistribuuje samotnou databázi CrossOveru. Přidává čtení pravidel z `HKCU\Software\MacWine\Compat`. Spouštěč nastavuje argumenty pro Chromium ve Steam/Rockstar launcherech. Steam dostává `--no-sandbox --in-process-gpu --disable-gpu`, kromě procesu s `--type=crashpad-handler`; SocialClubHelper dostává `--in-process-gpu --use-gl=angle --use-angle=swiftshader`. Rockstar `Launcher.exe` používá vestavěné D3D knihovny Wine. Pro `PlayGTAV.exe` se přidává `-nobattleye`; tento režim není potvrzením funkčnosti GTA Online.
-- `dxvk-mingw14.patch` podmiňuje starší náhradní deklarace podle verze mingw-w64; s aktuálním toolchainem mingw 11 zůstávají dostupné. Sestavení DXVK navíc přidává hlavičku `cstdint`.
-- `moltenvk-crossover-defaults.patch` mění výchozí hodnoty: synchronous queue submits `0`, large query pools `0`, full image view swizzle `1`, log level `WARNING`, resume lost device `1`, Metal argument buffers `0`, maximize concurrent compilation `1`. Jde o nastavení zvolená při porovnávání s CrossOverem; samostatný vliv těchto hodnot na odstranění zamrzání nebyl izolovaně ověřen.
+If MacWine is useful to you, you can [sponsor its development on GitHub](https://github.com/sponsors/mnavratil92-afk).
 
-## Spolupráce na projektu
+## License
 
-Codex připravuje `prepare-sources.sh` a tento README. Claude spravuje spouštěč, sestavovací skripty, patche a běžící sestavení. Pracovní zprávy se předávají v lokální `.collab/`, vyloučené přes `.git/info/exclude`; toto vyloučení se nepřenáší do jiného klonu. Soubory samy neprobouzejí nečinného agenta, proto se důležitá předání oznamují také v chatu.
+MacWine's own code is licensed under the **GNU LGPL 2.1** (see [LICENSE](LICENSE)). Wine, DXVK, MoltenVK and the other components keep their own licenses — see [NOTICE](NOTICE).
+
+MacWine is not affiliated with Apple, CodeWeavers, Valve, Epic Games, GOG or Ubisoft. All trademarks belong to their owners.

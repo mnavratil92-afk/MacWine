@@ -11,7 +11,7 @@ usage() {
   cat <<'HELP'
 Pouziti: ./prepare-sources.sh NOVY_BUILD_ADRESAR [LOKALNI_ARCHIV]
 Pripravi sources/ a archiv pro build-*.sh. Cil nesmi existovat.
-Bez lokalniho archivu stahne CrossOver sources 26.3.0 od CodeWeavers.
+Bez lokalniho archivu stahne zdrojovy archiv Wine 26.3.0 publikovany CodeWeavers.
 Pri chybe muze zustat prazdny cilovy adresar; existujici data nemeni.
 HELP
 }
@@ -45,7 +45,7 @@ for component in wine dxvk moltenvk freetype gnutls; do
   [ -d "$stage/sources/$component" ] || die "v archivu chybi sources/$component"
 done
 {
-  printf 'CrossOver sources 26.3.0\nURL: %s\nSHA256: %s\n\nPatche (poradi aplikace a SHA256):\n' "$URL" "$actual"
+  printf 'Wine source archive 26.3.0 (CodeWeavers)\nURL: %s\nSHA256: %s\n\nPatche (poradi aplikace a SHA256):\n' "$URL" "$actual"
 } > "$stage/prepare-sources.manifest"
 shopt -s nullglob
 patches=("$SCRIPT_DIR"/patches/*.patch)
