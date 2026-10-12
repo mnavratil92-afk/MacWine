@@ -52,7 +52,9 @@ BOTTLES="$MACWINE_HOME/bottles"
 WINE="$RUNTIME/lib/wine/x86_64-unix/wine"
 WINESERVER="$RUNTIME/bin/wineserver"
 TOOLS="$RUNTIME/lib/macwine"
-DXVK_DLLS="d3d9 d3d10 d3d10_1 d3d10core d3d11"
+# DXVK handles DirectX 10/11. DirectX 9 stays on Wine's own Direct3D (wined3d): DXVK's D3D9 pipelines
+# fail to compile on MoltenVK, so DX9 games would start with a black screen.
+DXVK_DLLS="d3d10 d3d10_1 d3d10core d3d11"
 APP_BUNDLE_ID="cz.navratil.macwine"
 
 STEAM_URL="https://cdn.cloudflare.steamstatic.com/client/installer/SteamSetup.exe"
@@ -222,6 +224,7 @@ install_compat() {
     printf '"AppendArgs"="--no-sandbox --in-process-gpu --disable-gpu"\n\n'
     printf '[HKEY_CURRENT_USER\\Software\\MacWine\\Compat\\PlayGTAV.exe]\n'
     printf '"AppendArgs"="-nobattleye"\n\n'
+    printf '[HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides]\n"d3d9"="builtin"\n\n'
     printf '[HKEY_CURRENT_USER\\Software\\Wine\\AppDefaults\\Launcher.exe\\DllOverrides]\n'
     for dll in $DXVK_DLLS; do printf '"%s"="builtin"\n' "$dll"; done
   } > "$reg"
@@ -243,7 +246,7 @@ write_dll_overrides() { # native,builtin (DXVK) or builtin (wined3d)
   rm -f "$reg"
 }
 
-COMPAT_VERSION=3   # bump when install_compat changes; bottles are updated on their next start
+COMPAT_VERSION=4   # bump when install_compat changes; bottles are updated on their next start
 ensure_compat() { # bottle
   [ "$(conf_get "$1" compat 1)" = "$COMPAT_VERSION" ] && return 0
   install_compat >/dev/null 2>&1 && conf_set "$1" compat "$COMPAT_VERSION"

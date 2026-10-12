@@ -10,6 +10,8 @@ Tested on a MacBook Pro M1 Pro, macOS 27, MacWine 0.9.x.
 | --- | --- | --- | --- |
 | Grand Theft Auto V Legacy | Steam | ✅ Plays well | Story mode at a steady 60 FPS (GPU about 60–70 %). Use *Windowed Borderless* and a 60 FPS limit – exclusive fullscreen can freeze. Online modes protected by BattlEye are not supported. |
 | The Forest | Steam | ✅ Runs | Starts and renders correctly; longer play not tested yet. |
+| Human Resource Machine | Epic | ✅ Runs | Downloaded directly from Epic (no launcher); DirectX 9 game. |
+| FlatOut | GOG | ⚠️ Runs, audio stutters | Downloaded directly from GOG (no GOG Galaxy); renders correctly (DirectX 9), sound stutters in the menu. |
 
 ## Launchers and stores
 
@@ -18,8 +20,8 @@ Tested on a MacBook Pro M1 Pro, macOS 27, MacWine 0.9.x.
 | Steam | ✅ Works | Sign-in, store pages, library, downloads. |
 | Rockstar Games Launcher | ✅ Works | Needed for GTA V; uses Wine's built-in Direct3D. |
 | Ubisoft Connect | ✅ Works | Sign-in and library; MacWine reads the library from Ubisoft Connect. |
-| Epic Games | ✅ Library | Sign-in inside MacWine and the full library work; game downloads go through Legendary. |
-| GOG | ✅ Library | Sign-in inside MacWine and the full library work; game downloads go through gogdl. |
+| Epic Games | ✅ Works | Sign-in inside MacWine, full library, direct game downloads (Legendary). |
+| GOG | ✅ Works | Sign-in inside MacWine, full library, direct game downloads (gogdl). |
 
 ## Known limitations
 
