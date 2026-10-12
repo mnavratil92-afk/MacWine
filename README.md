@@ -32,7 +32,7 @@ MacWine never asks for your store passwords: you sign in on the store's own web 
 
 Download the latest `MacWine.zip` from [Releases](../../releases), unzip it and move **MacWine.app** to *Applications*. On first launch MacWine downloads its Windows runtime (about 85 MB).
 
-MacWine is not notarized by Apple yet. The first time, right-click the app and choose **Open**.
+MacWine is not notarized by Apple yet, so macOS blocks the first launch. Open it once, then go to *System Settings → Privacy & Security* and click **Open Anyway** (on macOS 13–14 you can also right-click the app and choose **Open**).
 
 ## Tips
 
