@@ -137,8 +137,28 @@ d3dmetal_runtime() { # -> runtime variant with D3DMetal overlaid (created once p
   echo "$dest"
 }
 
+# Bottles created before MacWine 0.9.15 have their Windows user profile in C:\users\crossover (the user name
+# of the Wine sources MacWine builds from). Wine now reports "macwine": move the profile once, while the bottle
+# is stopped, fix the registry paths, and keep the old path as a link for programs that saved it.
+migrate_user_profile() { # bottle
+  local p="$BOTTLES/$1" u="$BOTTLES/$1/drive_c/users" f
+  [ -e "$u/crossover" ] || return 0
+  bottle_running "$1" && return 0
+  if [ -d "$u/crossover" ] && [ ! -L "$u/crossover" ] && [ ! -e "$u/macwine" ]; then
+    mv "$u/crossover" "$u/macwine" && ln -s macwine "$u/crossover" || return 0
+    echo "Bottle '$1': Windows user profile moved to C:\\users\\macwine" >&2
+  fi
+  [ -d "$u/macwine" ] || return 0
+  for f in user.reg system.reg userdef.reg; do
+    [ -f "$p/$f" ] && grep -qi 'users\\\\crossover' "$p/$f" || continue
+    [ -f "$p/$f.before-user-rename" ] || cp -p "$p/$f" "$p/$f.before-user-rename"
+    /usr/bin/perl -pi -e 's/\\\\users\\\\crossover(?=\\\\|")/\\\\users\\\\macwine/gi' "$p/$f"
+  done
+}
+
 setup_env() { # bottle
   export WINEPREFIX="$BOTTLES/$1"
+  migrate_user_profile "$1"
   if [ "$(conf_get "$1" graphics dxvk)" = d3dmetal ]; then
     d3dmetal_installed || die "bottle '$1' uses D3DMetal, but it is not installed (macwine d3dmetal import <Game Porting Toolkit .dmg>)"
     RUNTIME="$(d3dmetal_runtime)"; WINE="$RUNTIME/lib/wine/x86_64-unix/wine"; WINESERVER="$RUNTIME/bin/wineserver"
