@@ -1,0 +1,62 @@
+name: Bug report
+description: MacWine itself does something wrong (crash, store sign-in, library, install, shortcuts…)
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! If a **specific game** does not run but MacWine works fine otherwise, please **rate the game** instead (in MacWine: open the game → Rate This Game…). Use this form for problems with MacWine itself.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open MacWine
+        2. Click …
+        3. …
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Steam
+        - Epic Games
+        - GOG
+        - Ubisoft Connect
+        - Custom bottle / own .exe or .msi
+        - Game shortcuts
+        - Updates / first launch / runtime download
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: macwine
+    attributes:
+      label: MacWine version
+      description: MacWine → About MacWine
+      placeholder: "0.9.15"
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and Mac
+      placeholder: "macOS 15.4, MacBook Pro M1 Pro"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (optional)
+      description: |
+        For problems inside a bottle, start it with logging and attach the files from ~/MacWine/logs:
+        `MACWINE_LOG=1 /Applications/MacWine.app/Contents/Resources/macwine launch <bottle> <store> <id>`
+        Logs may contain file paths with your user name – check before posting.
+      render: text

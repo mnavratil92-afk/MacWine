@@ -34,6 +34,10 @@ Download the latest `MacWine.zip` from [Releases](../../releases), unzip it and 
 
 MacWine is not notarized by Apple yet, so macOS blocks the first launch. Open it once, then go to *System Settings → Privacy & Security* and click **Open Anyway** (on macOS 13–14 you can also right-click the app and choose **Open**).
 
+## Tested games
+
+See [COMPATIBILITY.md](COMPATIBILITY.md) for what has been tested by hand, and the community ratings in the app for everything else.
+
 ## Tips
 
 - **GTA V (Legacy):** use *Windowed Borderless* instead of exclusive fullscreen and a 60 FPS limit. Story mode works; online modes that need BattlEye are not supported.

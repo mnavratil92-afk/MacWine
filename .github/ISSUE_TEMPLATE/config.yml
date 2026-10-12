@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Rate how a game runs
+    url: https://github.com/mnavratil92-afk/MacWine/discussions/categories/compatibility
+    about: Open the game in MacWine and use "Rate This Game…" – ratings are shared with all users.
+  - name: Ask a question
+    url: https://github.com/mnavratil92-afk/MacWine/discussions/categories/q-a
+    about: Help with setup, a specific game or settings.
