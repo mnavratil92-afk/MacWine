@@ -41,10 +41,8 @@ struct MainView: View {
                     }.padding(.horizontal, 12)
                 }
                 Button {
-                    if let raw = Bundle.main.object(forInfoDictionaryKey: "MacWineDonationURL") as? String,
-                       let url = URL(string: raw), url.scheme == "https", url.host != nil { NSWorkspace.shared.open(url) }
-                    else { showDonationInfo = true }
-                } label: { Label("Buy me a coffee", systemImage: "cup.and.saucer") }
+                    if let url = model.sponsorURL { NSWorkspace.shared.open(url) } else { showDonationInfo = true }
+                } label: { Label("Sponsor MacWine", systemImage: "heart") }
                 .buttonStyle(.borderless).font(.caption).foregroundStyle(.secondary)
                 .padding(.horizontal, 20).padding(.bottom, 18).help("Support the development of MacWine")
             }.navigationSplitViewColumnWidth(min: 205, ideal: 230, max: 280)

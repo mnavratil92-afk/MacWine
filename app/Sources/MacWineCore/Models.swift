@@ -133,3 +133,12 @@ public struct CLIError: LocalizedError {
     public init(message: String) { self.message = message }
     public var errorDescription: String? { message }
 }
+
+public struct CommunityRating: Decodable, Equatable {
+    public let average: Double
+    public let count: Int
+    public let latestVersion: String?
+}
+public struct RatingsFile: Decodable {
+    public let games: [String: CommunityRating]
+}

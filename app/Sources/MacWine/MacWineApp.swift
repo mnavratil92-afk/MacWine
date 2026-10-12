@@ -110,7 +110,14 @@ struct GameCard: View {
         VStack(alignment: .leading, spacing: 8) {
             Button { model.detail = game } label: { GameArt(game: game) }.buttonStyle(.plain).accessibilityLabel("Show details for " + game.name)
             Text(game.name).font(.headline).lineLimit(2).frame(height: 36, alignment: .topLeading)
-            Text(game.store.title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            HStack(spacing: 6) {
+                Text(game.store.title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Spacer(minLength: 0)
+                if let rating = model.ratings[model.ratingKey(game)] {
+                    StarsView(value: rating.average, size: 9)
+                    Text("\(rating.count)").font(.caption2).foregroundStyle(.secondary)
+                }
+            }.help(model.ratings[model.ratingKey(game)].map { "Community rating \(String(format: "%.1f", $0.average)) of 5 from \($0.count) players" } ?? "")
             HStack {
                 Label(game.installed ? "Installed" : "Not installed", systemImage: game.installed ? "checkmark.circle.fill" : "arrow.down.circle")
                     .font(.caption2).foregroundStyle(.secondary)
@@ -130,6 +137,7 @@ struct GameDetailView: View {
     let game: Game
     @EnvironmentObject var model: AppModel
     @Environment(\.dismiss) var dismiss
+    @State private var rating = false
     var body: some View {
         HStack(alignment: .top, spacing: 26) {
             GameArt(game: game).frame(width: 155)
@@ -148,9 +156,77 @@ struct GameDetailView: View {
                     if model.customArtwork(game) != nil { Button("Remove Image") { model.removeArtwork(game) } }
                 }
                 Text("Your own cover for games without one. Also used as the shortcut icon.").font(.caption).foregroundStyle(.secondary)
+                Divider()
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Community rating").font(.headline)
+                    if let rating = model.ratings[model.ratingKey(game)] {
+                        HStack(spacing: 8) {
+                            StarsView(value: rating.average, size: 14)
+                            Text(String(format: "%.1f", rating.average)).bold()
+                            Text("· \(rating.count) \(rating.count == 1 ? "player" : "players")").foregroundStyle(.secondary)
+                        }
+                        if let v = rating.latestVersion { Text("Latest report from MacWine \(v)").font(.caption).foregroundStyle(.secondary) }
+                    } else {
+                        Text("No ratings yet.").foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Button("Rate This Game…") { rating = true }.disabled(model.githubRepo == nil)
+                        if let url = model.reportsURL(game) { Link("Read Reports", destination: url) }
+                    }
+                }
                 Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
             }
         }.padding(30).frame(width: 600)
+        .sheet(isPresented: $rating) { RateGameView(game: game) }
+    }
+}
+
+/// Five stars, filled to `value` (0...5, halves shown as half stars).
+struct StarsView: View {
+    let value: Double
+    var size: CGFloat = 12
+    var body: some View {
+        HStack(spacing: 1) {
+            ForEach(1...5, id: \.self) { i in
+                let d = value - Double(i - 1)
+                Image(systemName: d >= 0.75 ? "star.fill" : d >= 0.25 ? "star.leadinghalf.filled" : "star")
+                    .font(.system(size: size)).foregroundStyle(.orange)
+            }
+        }.accessibilityLabel(String(format: "%.1f of 5 stars", value))
+    }
+}
+
+struct RateGameView: View {
+    let game: Game
+    @EnvironmentObject var model: AppModel
+    @Environment(\.dismiss) var dismiss
+    @State private var stars = 3
+    static let meanings = ["Does not start", "Starts, but is not playable", "Playable with major problems",
+                           "Playable with some problems", "Works well, minor issues", "Works perfectly"]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Rate \(game.name)").font(.title2.bold())
+            Text("How well does this game run in MacWine on your Mac?").foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Button { stars = 0 } label: { Image(systemName: stars == 0 ? "xmark.circle.fill" : "xmark.circle").font(.title2) }
+                    .buttonStyle(.plain).foregroundStyle(stars == 0 ? .red : .secondary).help("0 – Does not start").accessibilityLabel("0 stars, does not start")
+                ForEach(1...5, id: \.self) { i in
+                    Button { stars = i } label: { Image(systemName: i <= stars ? "star.fill" : "star").font(.title) }
+                        .buttonStyle(.plain).foregroundStyle(.orange).help("\(i) – \(Self.meanings[i])").accessibilityLabel("\(i) of 5 stars, \(Self.meanings[i])")
+                }
+            }
+            Text("\(stars)/5 – \(Self.meanings[stars])").font(.headline)
+            Text("Your rating is shared with all MacWine users through GitHub Discussions (a free GitHub account is needed). The next page is already filled in – add a note if you like and post it. Ratings appear in MacWine within about an hour.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Continue on GitHub") {
+                    if let url = model.rateURL(game, stars: stars) { NSWorkspace.shared.open(url) }
+                    dismiss()
+                }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+            }
+        }.padding(26).frame(width: 460)
     }
 }
 

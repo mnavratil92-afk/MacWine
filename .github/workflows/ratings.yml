@@ -1,0 +1,43 @@
+# Aggregates the community compatibility ratings (Discussions, category "Compatibility")
+# into ratings.json on the "ratings" branch. The MacWine app reads that file - no account or token needed.
+name: Compatibility ratings
+
+on:
+  discussion:
+    types: [created, edited, deleted, category_changed]
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  discussions: read
+
+concurrency:
+  group: ratings
+  cancel-in-progress: false
+
+jobs:
+  aggregate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+      - name: Collect ratings
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const run = require('./.github/scripts/aggregate-ratings.js');
+            await run({ github, context, core });
+      - name: Publish ratings.json
+        run: |
+          set -e
+          mkdir /tmp/ratings && cp ratings.json /tmp/ratings/
+          cd /tmp/ratings
+          git init -q -b ratings
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ratings.json
+          git commit -q -m "Update compatibility ratings"
+          git push -q -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" ratings

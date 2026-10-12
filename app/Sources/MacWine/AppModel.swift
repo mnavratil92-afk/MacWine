@@ -8,6 +8,7 @@ import MacWineCore
 final class AppModel: ObservableObject {
     @Published var bottles: [Bottle] = []
     @Published var artworkVersion = 0   // bumped when a custom game image changes
+    @Published var ratings: [String: CommunityRating] = [:]   // "store/id" -> community rating
     @Published var games: [Game] = []
     @Published var accounts: [StoreAccount] = []
     @Published var selection: String? = "all"
@@ -93,6 +94,7 @@ final class AppModel: ObservableObject {
         guard !busy else { return }
         busy = true; status = "Refreshing library…"
         defer { busy = false }
+        Task { await loadRatings() }
         do {
             let list = try await cli.decode([Bottle].self, ["list", "--json"])
             let result = await Task.detached { LibraryScanner().scan(list) }.value
@@ -220,6 +222,54 @@ final class AppModel: ObservableObject {
             try png.write(to: target, options: .atomic)
             artworkVersion += 1
         } catch { self.error = "Could not save the image: \(error.localizedDescription)" }
+    }
+    // MARK: Community compatibility ratings (GitHub Discussions, aggregated into ratings.json by a GitHub Action)
+    var githubRepo: String? {
+        guard let repo = Bundle.main.object(forInfoDictionaryKey: "MacWineRepo") as? String,
+              repo.range(of: #"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$"#, options: .regularExpression) != nil else { return nil }
+        return repo
+    }
+    func ratingKey(_ game: Game) -> String { "\(game.store.rawValue)/\(game.storeID)" }
+    func loadRatings() async {
+        guard let repo = githubRepo, let url = URL(string: "https://raw.githubusercontent.com/\(repo)/ratings/ratings.json") else { return }
+        var request = URLRequest(url: url); request.cachePolicy = .reloadIgnoringLocalCacheData; request.timeoutInterval = 15
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let file = try? JSONDecoder().decode(RatingsFile.self, from: data) else { return }   // offline or not public yet
+        ratings = file.games
+    }
+    /// Opens a new pre-filled report in the repository's "Compatibility" discussions.
+    func rateURL(_ game: Game, stars: Int) -> URL? {
+        guard let repo = githubRepo else { return nil }
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+        let os = ProcessInfo.processInfo.operatingSystemVersion
+        var size = 0; sysctlbyname("machdep.cpu.brand_string", nil, &size, nil, 0)
+        var chip = [CChar](repeating: 0, count: max(size, 1)); sysctlbyname("machdep.cpu.brand_string", &chip, &size, nil, 0)
+        let body = """
+        Game: \(ratingKey(game)) (\(game.name))
+        Rating: \(String(repeating: "★", count: stars))\(String(repeating: "☆", count: 5 - stars)) \(stars)/5
+        MacWine: \(version) · macOS \(os.majorVersion).\(os.minorVersion) · \(String(cString: chip))
+
+        Notes (what works, what does not, settings you changed):
+
+        """
+        var c = URLComponents(string: "https://github.com/\(repo)/discussions/new")!
+        c.queryItems = [URLQueryItem(name: "category", value: "compatibility"),
+                        URLQueryItem(name: "title", value: "\(game.name) – \(stars)/5"),
+                        URLQueryItem(name: "body", value: body)]
+        return c.url
+    }
+    func reportsURL(_ game: Game) -> URL? {
+        guard let repo = githubRepo else { return nil }
+        var c = URLComponents(string: "https://github.com/\(repo)/discussions/categories/compatibility")!
+        c.queryItems = [URLQueryItem(name: "discussions_q", value: "\"\(ratingKey(game))\"")]
+        return c.url
+    }
+    var sponsorURL: URL? {
+        if let raw = Bundle.main.object(forInfoDictionaryKey: "MacWineDonationURL") as? String,
+           let url = URL(string: raw), url.scheme == "https", url.host != nil { return url }
+        guard let owner = githubRepo?.split(separator: "/").first else { return nil }
+        return URL(string: "https://github.com/sponsors/\(owner)")
     }
     func removeArtwork(_ game: Game) {
         try? FileManager.default.removeItem(at: customArtworkURL(game))

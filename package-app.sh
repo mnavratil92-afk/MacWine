@@ -94,9 +94,13 @@ if [ -n "$RELEASE_REPO" ] && [ -n "${MACWINE_SPARKLE_PUBLIC_KEY:-}" ]; then
   <key>SUPublicEDKey</key><string>$MACWINE_SPARKLE_PUBLIC_KEY</string>
   <key>SUEnableAutomaticChecks</key><true/>"
 fi
-DONATION_KEY=""
+# GitHub repository: community ratings (ratings.json on its "ratings" branch, Discussions) and GitHub Sponsors
+GITHUB_REPO="${MACWINE_GITHUB_REPO:-${RELEASE_REPO:-mnavratil92-afk/MacWine}}"
+[[ "$GITHUB_REPO" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || { echo "MACWINE_GITHUB_REPO musi byt <owner>/<repo>"; exit 1; }
+DONATION_KEY="  <key>MacWineRepo</key><string>$GITHUB_REPO</string>"
 if [ -n "$DONATION_URL" ]; then
-  DONATION_KEY="  <key>MacWineDonationURL</key><string>$DONATION_URL</string>"
+  DONATION_KEY="$DONATION_KEY
+  <key>MacWineDonationURL</key><string>$DONATION_URL</string>"
 fi
 
 cat > "$APP/Contents/Info.plist" <<EOF
