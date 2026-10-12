@@ -50,7 +50,10 @@ chmod +x "$APP/Contents/Resources/macwine"
 WINE_V="$("$RUNTIME_SRC/lib/wine/x86_64-unix/wine" --version 2>/dev/null || true)"
 DXVK_V="$(strings -a "$RUNTIME_SRC/lib/dxvk/x86_64-windows/d3d11.dll" | grep -E '^v[0-9]+\.[0-9]+' | head -1 || true)"
 RT_VERSION="wine${WINE_V#wine-}-dxvk${DXVK_V#v}"
-RT_VERSION="$RT_VERSION-mvk$(cat "$RUNTIME_SRC/lib/macwine/moltenvk-version" 2>/dev/null || echo 0)-r${MACWINE_RUNTIME_REVISION:-1}"
+# Content fingerprint: a changed runtime gets a new version, so a stale archive is never reused
+# and installed copies download the new runtime. (Symlinks are listed by their target.)
+RT_FP="$(cd "$RUNTIME_SRC" && { find . -type f ! -path ./lib/macwine/runtime-version -print0 | sort -z | xargs -0 shasum; find . -type l | sort | while read -r l; do echo "$l -> $(readlink "$l")"; done; } | shasum | cut -c1-8)"
+RT_VERSION="$RT_VERSION-mvk$(cat "$RUNTIME_SRC/lib/macwine/moltenvk-version" 2>/dev/null || echo 0)-$RT_FP"
 if [ "$RELEASE" = 0 ]; then
   # Runtime: APFS klon (cp -c) - nezabira misto navic
   cp -cR "$RUNTIME_SRC" "$APP/Contents/Resources/runtime"
