@@ -1,11 +1,11 @@
 #!/bin/bash
-# Slozi MacWine.app: aplikace (SwiftUI, app/) + CLI (macwine) + runtime (Wine, DXVK, MoltenVK).
+# Assembles MacWine.app: the app (SwiftUI, app/) + CLI (macwine) + runtime (Wine, DXVK, MoltenVK).
 #
-#   ./package-app.sh                 sestavi do $BUILD/app-stage/MacWine.app
-#   ./package-app.sh --install       a nahradi ~/Applications/MacWine.app (jen kdyz zadny bottle nebezi)
+#   ./package-app.sh                 builds $BUILD/app-stage/MacWine.app
+#   ./package-app.sh --install       and replaces ~/Applications/MacWine.app (only while no bottle is running)
 #
-# Promenne: MACWINE_BUILD, MACWINE_DEST (zdroj runtime), MACWINE_APP_DIR (cil instalace),
-#           MACWINE_DONATION_URL (volitelny https odkaz pro tlacitko podpory v aplikaci).
+# Variables: MACWINE_BUILD, MACWINE_DEST (runtime source), MACWINE_APP_DIR (install target),
+#           MACWINE_DONATION_URL (optional https link for the app's support button).
 set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
@@ -20,29 +20,28 @@ INSTALL=0 RELEASE=0
 case "${1:-}" in --install) INSTALL=1 ;; --release) RELEASE=1 ;; esac
 # --release: app WITHOUT runtime + separate runtime archive (downloaded by "macwine runtime install").
 #   MACWINE_RELEASE_REPO=<owner>/<repo>   GitHub repository for download URLs (required)
-#   MACWINE_RUNTIME_REVISION=<n>          bump when the runtime changes without a component version change
 RELEASE_REPO="${MACWINE_RELEASE_REPO:-}"
 [ "$RELEASE" = 0 ] || [ -n "$RELEASE_REPO" ] || { echo "Set MACWINE_RELEASE_REPO=<owner>/<repo>"; exit 1; }
 
-case "$DONATION_URL" in ""|https://*) ;; *) echo "MACWINE_DONATION_URL musi zacinat https://"; exit 1 ;; esac
-[ -x "$RUNTIME_SRC/lib/wine/x86_64-unix/wine" ] || { echo "Chybi runtime v $RUNTIME_SRC (spust build skripty)"; exit 1; }
+case "$DONATION_URL" in ""|https://*) ;; *) echo "MACWINE_DONATION_URL must start with https://"; exit 1 ;; esac
+[ -x "$RUNTIME_SRC/lib/wine/x86_64-unix/wine" ] || { echo "No runtime in $RUNTIME_SRC (run the build scripts)"; exit 1; }
 
-echo "== Sestavuji aplikaci (swift build)"
+echo "== Building the app (swift build)"
 swift build -c release --package-path "$SRC/app"
 BIN="$SRC/app/.build/release/MacWine"
-[ -x "$BIN" ] || { echo "Chybi $BIN"; exit 1; }
+[ -x "$BIN" ] || { echo "Missing $BIN"; exit 1; }
 
-echo "== Pomocne nastroje"
+echo "== Helper tools"
 MACWINE_DEST="$RUNTIME_SRC" "$SRC/tools/build-tools.sh" >/dev/null
 
-echo "== Skladam $APP"
+echo "== Assembling $APP"
 mkdir -p "$STAGE"
 if [ -e "$APP" ]; then mv "$APP" "$STAGE/MacWine.app.prev-$(date +%s)"; fi
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/MacWine"
 # Sparkle (automatic updates) - whole framework incl. symlinks; the app links @executable_path/../Frameworks
 SPARKLE_FW="$SRC/app/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
-[ -d "$SPARKLE_FW" ] || { echo "Chybi $SPARKLE_FW (swift build stahne Sparkle)"; exit 1; }
+[ -d "$SPARKLE_FW" ] || { echo "Missing $SPARKLE_FW (swift build downloads Sparkle)"; exit 1; }
 mkdir -p "$APP/Contents/Frameworks"
 ditto "$SPARKLE_FW" "$APP/Contents/Frameworks/Sparkle.framework"
 cp "$SRC/macwine" "$APP/Contents/Resources/macwine"
@@ -55,10 +54,10 @@ RT_VERSION="wine${WINE_V#wine-}-dxvk${DXVK_V#v}"
 RT_FP="$(cd "$RUNTIME_SRC" && { find . -type f ! -path ./lib/macwine/runtime-version -print0 | sort -z | xargs -0 shasum; find . -type l | sort | while read -r l; do echo "$l -> $(readlink "$l")"; done; } | shasum | cut -c1-8)"
 RT_VERSION="$RT_VERSION-mvk$(cat "$RUNTIME_SRC/lib/macwine/moltenvk-version" 2>/dev/null || echo 0)-$RT_FP"
 if [ "$RELEASE" = 0 ]; then
-  # Runtime: APFS klon (cp -c) - nezabira misto navic
+  # Runtime: APFS clone (cp -c) - takes no extra space
   cp -cR "$RUNTIME_SRC" "$APP/Contents/Resources/runtime"
 else
-  echo "== Runtime archiv $RT_VERSION"
+  echo "== Runtime archive $RT_VERSION"
   OUT="$STAGE/release"; mkdir -p "$OUT/rt"
   RT_ARCHIVE="$OUT/macwine-runtime-$RT_VERSION.tar.xz"
   if [ ! -f "$RT_ARCHIVE" ]; then
@@ -74,7 +73,7 @@ else
     '{version: $v, url: $u, sha256: $h, size: $s}' > "$APP/Contents/Resources/runtime.json"
 fi
 
-echo "== Ikona"
+echo "== Icon"
 ICONSET="$STAGE/AppIcon.iconset"
 mkdir -p "$ICONSET"
 swift "$SRC/tools/make-icon.swift" "$STAGE/AppIcon-1024.png" "$STAGE/Logo-full.png" >/dev/null
@@ -99,7 +98,7 @@ if [ -n "$RELEASE_REPO" ] && [ -n "${MACWINE_SPARKLE_PUBLIC_KEY:-}" ]; then
 fi
 # GitHub repository: community ratings (ratings.json on its "ratings" branch, Discussions) and GitHub Sponsors
 GITHUB_REPO="${MACWINE_GITHUB_REPO:-${RELEASE_REPO:-mnavratil92-afk/MacWine}}"
-[[ "$GITHUB_REPO" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || { echo "MACWINE_GITHUB_REPO musi byt <owner>/<repo>"; exit 1; }
+[[ "$GITHUB_REPO" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || { echo "MACWINE_GITHUB_REPO must be <owner>/<repo>"; exit 1; }
 DONATION_KEY="  <key>MacWineRepo</key><string>$GITHUB_REPO</string>"
 if [ -n "$DONATION_URL" ]; then
   DONATION_KEY="$DONATION_KEY
@@ -158,39 +157,39 @@ $SPARKLE_KEYS
 EOF
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 
-echo "== Podpis (ad-hoc)"
-# Mach-O soubory runtime uz podepsal package-runtime.sh; tady se zapecetuje cely balicek.
+echo "== Signing (ad hoc)"
+# package-runtime.sh already signed the runtime's Mach-O files; this seals the whole bundle.
 codesign --force -s - "$APP"
-echo "Hotovo: $APP ($(du -sh "$APP" | cut -f1))"
+echo "Done: $APP ($(du -sh "$APP" | cut -f1))"
 if [ "$RELEASE" = 1 ]; then
   ZIP="$OUT/MacWine-$VERSION.zip"
   ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
-  echo "Release soubory v $OUT:"; ls -lh "$ZIP" "$RT_ARCHIVE" | awk '{print "  " $5 "  " $9}'
+  echo "Release files in $OUT:"; ls -lh "$ZIP" "$RT_ARCHIVE" | awk '{print "  " $5 "  " $9}'
   exit 0
 fi
 
 [ "$INSTALL" = 1 ] || exit 0
 
-echo "== Instalace do $APP_DIR"
+echo "== Installing into $APP_DIR"
 for b in "$HOME/MacWine/bottles"/*/; do
   [ -d "$b" ] || continue
   if "$APP/Contents/Resources/macwine" settings "$(basename "$b")" 2>/dev/null | grep -q '^running=true'; then
-    echo "Bottle $(basename "$b") prave bezi - ukonci ho (macwine kill $(basename "$b")) a spust znovu s --install."
+    echo "Bottle $(basename "$b") is running - stop it (macwine kill $(basename "$b")) and run again with --install."
     exit 2
   fi
 done
 mkdir -p "$APP_DIR"
 if [ -e "$APP_DIR/MacWine.app" ]; then
-  # Stara verze se jen odsune do build adresare (smazat ji muze uzivatel), nic se nemaze.
+  # The old version is only moved into the build folder (the user may delete it); nothing is deleted.
   mv "$APP_DIR/MacWine.app" "$STAGE/MacWine.app.installed-$(date +%s)"
 fi
 mv "$APP" "$APP_DIR/MacWine.app"
 ln -sfn "$APP_DIR/MacWine.app/Contents/Resources/runtime" "$HOME/MacWine/runtime"
 /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_DIR/MacWine.app"
-echo "Nainstalovano: $APP_DIR/MacWine.app"
+echo "Installed: $APP_DIR/MacWine.app"
 # A running MacWine keeps executing the old code from memory - restart it so the update takes effect
 if pgrep -f "$APP_DIR/MacWine.app/Contents/MacOS/MacWine" >/dev/null; then
   pkill -f "$APP_DIR/MacWine.app/Contents/MacOS/MacWine" || true
   for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -f "$APP_DIR/MacWine.app/Contents/MacOS/MacWine" >/dev/null || break; sleep 0.5; done
-  open "$APP_DIR/MacWine.app" && echo "MacWine restartovan"
+  open "$APP_DIR/MacWine.app" && echo "MacWine restarted"
 fi

@@ -37,7 +37,7 @@ set -euo pipefail
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 SELF_DIR="$(dirname "$SELF")"
 MACWINE_HOME="${MACWINE_HOME:-$HOME/MacWine}"
-# Uvnitr MacWine.app je CLI i runtime v Contents/Resources (starsi rozlozeni: Contents/MacOS/runtime).
+# Inside MacWine.app the CLI and the runtime are in Contents/Resources (older layout: Contents/MacOS/runtime).
 # Runtime lookup: $MACWINE_RUNTIME, bundled in the app (dev builds), downloaded runtime
 # (~/Library/Application Support/MacWine/runtimes/current), legacy ~/MacWine/runtime.
 RUNTIMES="${MACWINE_RUNTIMES:-$HOME/Library/Application Support/MacWine/runtimes}"
@@ -67,7 +67,7 @@ UBISOFT_EXE='C:\Program Files (x86)\Ubisoft\Ubisoft Game Launcher\UbisoftConnect
 
 die() { echo "macwine: $*" >&2; exit 1; }
 
-# --- prepinace spolecne pro vsechny prikazy ---
+# --- options shared by all commands ---
 JSON=0 DETACH=0
 args=()
 for a in "$@"; do
@@ -79,20 +79,20 @@ for a in "$@"; do
 done
 set -- ${args[@]+"${args[@]}"}
 
-json_str() { # JSON retezec vcetne uvozovek
+json_str() { # JSON string including quotes
   local s="${1//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\n'/\\n}"; s="${s//$'\t'/\\t}"
   printf '"%s"' "$s"
 }
 
-# --- nastaveni bottlu: <bottle>/macwine.conf (klic=hodnota) ---
-conf_get() { # bottle klic vychozi
+# --- bottle settings: <bottle>/macwine.conf (key=value) ---
+conf_get() { # bottle key default
   local f="$BOTTLES/$1/macwine.conf" v=""
   [ -f "$f" ] && v="$(grep -m1 "^$2=" "$f" | cut -d= -f2-)" || true
-  # prevzeti stareho souboru macwine-fps
+  # take over the old macwine-fps file
   if [ -z "$v" ] && [ "$2" = fps ] && [ -f "$BOTTLES/$1/macwine-fps" ]; then v="$(tr -dc 0-9 < "$BOTTLES/$1/macwine-fps")"; fi
   echo "${v:-$3}"
 }
-conf_set() { # bottle klic hodnota
+conf_set() { # bottle key value
   local f="$BOTTLES/$1/macwine.conf"
   touch "$f"
   grep -v "^$2=" "$f" > "$f.tmp" || true
@@ -104,7 +104,7 @@ win_version() { # bottle
   v="$(grep -m1 -A3 '^\[Software\\\\Wine\]' "$BOTTLES/$1/user.reg" 2>/dev/null | grep -m1 '^"Version"=' | cut -d'"' -f4)" || true
   echo "${v:-win10}"
 }
-bottle_running() { # bottle -> 0 kdyz bezi wineserver bottlu
+bottle_running() { # bottle -> 0 when the bottle's wineserver is running
   local st dev ino
   st="$(stat -f '%d %i' "$BOTTLES/$1" 2>/dev/null)" || return 1
   dev="${st% *}"; ino="${st#* }"
@@ -167,11 +167,11 @@ setup_env() { # bottle
   fi
   export WINESERVER
   export WINEMSYNC=1
-  export ROSETTA_ADVERTISE_AVX="${ROSETTA_ADVERTISE_AVX-1}"  # hlasit AVX pod Rosettou (vyzaduji ho novejsi hry a Chromium)
+  export ROSETTA_ADVERTISE_AVX="${ROSETTA_ADVERTISE_AVX-1}"  # report AVX under Rosetta (newer games and Chromium require it)
   export WINEDEBUG="${WINEDEBUG:--all}"
   export DYLD_FALLBACK_LIBRARY_PATH="${MACWINE_MVK_DIR:+$MACWINE_MVK_DIR:}$RUNTIME/lib:/usr/lib"
   export DXVK_LOG_LEVEL="${DXVK_LOG_LEVEL:-none}"
-  # MACWINE_LOG=1: ladici logy Wine a DXVK do ~/MacWine/logs (dedi je i hry spustene ze Steamu)
+  # MACWINE_LOG=1: Wine and DXVK debug logs in ~/MacWine/logs (inherited by games started from Steam too)
   if [ "${MACWINE_LOG:-$(conf_get "$1" log 0)}" = 1 ]; then
     LOGDIR="$MACWINE_HOME/logs/$1-$(date +%Y%m%d-%H%M%S)"
     mkdir -p "$LOGDIR"
@@ -187,19 +187,19 @@ setup_env() { # bottle
     export GST_REGISTRY_FORK=no
     unset GST_PLUGIN_PATH
   fi
-  # Ukazatel FPS ve hre: MACWINE_HUD=1 nebo nastaveni bottlu hud=1
+  # In-game FPS display: MACWINE_HUD=1 or bottle setting hud=1
   if [ "${MACWINE_HUD:-$(conf_get "$1" hud 0)}" = 1 ]; then export DXVK_HUD="fps,frametimes,gpuload,compiler"; fi
-  # Limit FPS: MACWINE_FPS=<n>, jinak nastaveni bottlu fps=<n>
+  # FPS limit: MACWINE_FPS=<n>, otherwise bottle setting fps=<n>
   local fps="${MACWINE_FPS:-$(conf_get "$1" fps 0)}"
   if [ -n "$fps" ] && [ "$fps" != 0 ]; then export DXVK_FRAME_RATE="$fps"; fi
 }
 
-# Pravidla kompatibility:
-#  - vestavene prohlizece Steamu a Rockstar launcheru (Chromium) dostanou parametry,
-#    se kterymi se na Wine vykresli
-#  - Rockstar Launcher.exe pouziva wined3d misto DXVK
-#  - PlayGTAV.exe se spousti bez BattlEye
-# Parametry pridava upraveny kernelbase.dll (patches/wine-macwine-compat.patch).
+# Compatibility rules:
+#  - the built-in browsers (Chromium) of Steam, Rockstar and other launchers get the arguments
+#    they need to render under Wine
+#  - Rockstar Launcher.exe uses wined3d instead of DXVK
+#  - PlayGTAV.exe starts without BattlEye
+# The arguments are added by MacWine's kernelbase.dll (patches/wine-macwine-compat.patch).
 install_compat() {
   local reg dll
   reg="$(mktemp -t macwine).reg"
@@ -231,7 +231,7 @@ install_compat() {
   rm -f "$reg"
 }
 
-write_dll_overrides() { # native,builtin (DXVK) nebo builtin (wined3d)
+write_dll_overrides() { # native,builtin (DXVK) or builtin (wined3d)
   local dll reg
   reg="$(mktemp -t macwine).reg"
   {
@@ -249,7 +249,7 @@ ensure_compat() { # bottle
   install_compat >/dev/null 2>&1 && conf_set "$1" compat "$COMPAT_VERSION"
 }
 
-install_dxvk() { # nakopiruje DLL z DXVK do bottlu a nastavi je v registru
+install_dxvk() { # copies the DXVK DLLs into the bottle and registers them
   local dll src="${MACWINE_DXVK_DIR:-$RUNTIME/lib/dxvk}"
   for dll in $DXVK_DLLS; do
     cp "$src/x86_64-windows/$dll.dll" "$WINEPREFIX/drive_c/windows/system32/"
@@ -258,8 +258,8 @@ install_dxvk() { # nakopiruje DLL z DXVK do bottlu a nastavi je v registru
   write_dll_overrides native,builtin
 }
 
-# Aktualizace Wine (wineboot -u) prepise DLL v system32 vestavenymi; bez kontroly by se DXVK
-# po kazde nove verzi runtime tise vypnulo. Pri nesouladu nejdriv dokoncime aktualizaci bottlu.
+# A Wine update (wineboot -u) replaces the DLLs in system32 with builtin ones; without this check DXVK
+# would silently turn off after every new runtime. On a mismatch, finish the bottle update first.
 ensure_dxvk() { # bottle
   [ "$(conf_get "$1" graphics dxvk)" = dxvk ] || return 0
   local src="${MACWINE_DXVK_DIR:-$RUNTIME/lib/dxvk}"
@@ -276,7 +276,7 @@ need_bottle() {
   [ -d "$BOTTLES/$1" ] || die "bottle '$1' does not exist (create it: macwine create $1)"
 }
 
-unix_path() { # Windows cesta (C:\...) nebo unixova -> unixova cesta v bottlu
+unix_path() { # Windows path (C:\...) or Unix path -> Unix path inside the bottle
   case "$1" in
     [A-Za-z]:\\*|[A-Za-z]:/*)
       local d rest
@@ -286,7 +286,7 @@ unix_path() { # Windows cesta (C:\...) nebo unixova -> unixova cesta v bottlu
   esac
 }
 
-wine_start() { # program [argumenty...] - spusti ve Wine (s --detach na pozadi)
+wine_start() { # program [arguments...] - runs it in Wine (in the background with --detach)
   local dir
   dir="$(dirname "$(unix_path "$1")")"
   [ -d "$dir" ] && cd "$dir"
@@ -298,7 +298,7 @@ wine_start() { # program [argumenty...] - spusti ve Wine (s --detach na pozadi)
   exec "$WINE" "$@"
 }
 
-store_exe() { # obchod -> Windows cesta k launcheru
+store_exe() { # store -> Windows path of its launcher
   case "$1" in
     steam) echo "$STEAM_EXE" ;; epic) echo "$EPIC_EXE" ;;
     gog) echo "$GOG_EXE" ;; ubisoft) echo "$UBISOFT_EXE" ;;
@@ -306,12 +306,12 @@ store_exe() { # obchod -> Windows cesta k launcheru
   esac
 }
 
-download() { # url soubor
+download() { # url file
   echo "Downloading $(basename "$2")..." >&2
   curl -fL --retry 3 -o "$2" "$1"
 }
 
-setup_store() { # bottle obchod - nainstaluje launcher, pokud chybi
+setup_store() { # bottle store - installs the launcher when it is missing
   local exe tmp
   exe="$(unix_path "$(store_exe "$2")")"
   [ -f "$exe" ] && return 0
@@ -327,7 +327,7 @@ setup_store() { # bottle obchod - nainstaluje launcher, pokud chybi
   [ -f "$exe" ] || die "installing $2 failed ($exe is missing)"
 }
 
-store_url() { # akce obchod id -> URL pro launcher
+store_url() { # action store id -> URL for the launcher
   case "$2:$1" in
     steam:launch)   echo "steam://rungameid/$3" ;;
     steam:install)  echo "steam://install/$3" ;;
@@ -339,7 +339,7 @@ store_url() { # akce obchod id -> URL pro launcher
   esac
 }
 
-# Najde nainstalovanou MacWine.app (pro zastupce, ktere ji maji najit i po presunuti).
+# Finds the installed MacWine.app (for shortcuts, which must find it even after it was moved).
 app_cli_path() {
   if [ -f "$SELF_DIR/../Info.plist" ]; then echo "$SELF"; return; fi
   local app
@@ -347,7 +347,7 @@ app_cli_path() {
   if [ -n "$app" ] && [ -x "$app/Contents/Resources/macwine" ]; then echo "$app/Contents/Resources/macwine"; else echo "$SELF"; fi
 }
 
-extract_icon() { # exe vystup.png
+extract_icon() { # exe output.png
   local tool="$TOOLS/exeicon" tmp
   [ -x "$tool" ] || tool="$SELF_DIR/tools/exeicon"
   [ -x "$tool" ] || die "exeicon tool is missing (build it: tools/build-tools.sh)"
@@ -358,7 +358,7 @@ extract_icon() { # exe vystup.png
   rm -rf "$tmp"
 }
 
-make_icns() { # png vystup.icns
+make_icns() { # png output.icns
   local set s
   set="$(mktemp -d)/icon.iconset"; mkdir -p "$set"
   for s in 16 32 128 256 512; do
@@ -369,7 +369,7 @@ make_icns() { # png vystup.icns
   rm -rf "$(dirname "$set")"
 }
 
-store_icon_exe() { # obchod id -> unixova cesta k .exe pro ikonu (nebo prazdne)
+store_icon_exe() { # store id -> Unix path of the .exe that provides the icon (or empty)
   case "$1" in
     exe) unix_path "$2" ;;
     gog) if [[ "$2" =~ ^[0-9]+$ ]]; then local i; i="$(gog_info_file "$(basename "$WINEPREFIX")" "$2")"
@@ -1014,7 +1014,7 @@ case "$cmd" in
     app="$dest/$name.app"
     mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
     cli="$(app_cli_path)"
-    # Zastupce si MacWine.app dohleda pres bundle ID (funguje i po jejim presunuti); zalozne pevna cesta.
+    # The shortcut finds MacWine.app by its bundle ID (works even after it was moved); fixed path as a fallback.
     cat > "$app/Contents/MacOS/launcher" <<EOF
 #!/bin/bash
 # Zastupce MacWine: $name
@@ -1037,7 +1037,7 @@ EOF
   <key>LSUIElement</key><true/>
 </dict></plist>
 EOF
-    # Ikona: --icon (obrazek nebo .exe), jinak ikona programu / launcheru obchodu
+    # Icon: --icon (image or .exe), otherwise the icon of the program / store launcher
     png="$(mktemp -t macwine).png"
     case "$(printf '%s' "$icon" | tr 'A-Z' 'a-z')" in
       "") iexe="$(store_icon_exe "$store" "$id")"; [ -f "$iexe" ] && extract_icon "$iexe" "$png" 2>/dev/null || rm -f "$png" ;;
@@ -1243,18 +1243,18 @@ EOF
       printf '{"macwine":%s,"wine":%s,"dxvk":%s,"moltenvk":%s}\n' "$(json_str "$mw")" "$(json_str "${wv#wine-}")" "$(json_str "${dv#v}")" "$(json_str "$mv")"
     else echo "MacWine $mw, Wine ${wv#wine-}, DXVK ${dv#v}, MoltenVK $mv"; fi
     ;;
-  dxvk) # znovu nainstaluje DXVK a nastaveni registru do bottlu
+  dxvk) # reinstalls DXVK and its registry settings in the bottle
     need_bottle "${1:-}"; setup_env "$1"
     install_dxvk
     conf_set "$1" graphics dxvk
     echo "DXVK installed in bottle '$1'"
     ;;
-  compat) # zapise pravidla kompatibility do bottlu
+  compat) # writes the compatibility rules into the bottle
     need_bottle "${1:-}"; setup_env "$1"
     install_compat
     echo "Compatibility rules written to bottle '$1'"
     ;;
-  fps) # puvodni prikaz, ekvivalent: macwine set <bottle> fps <n>
+  fps) # original command, same as: macwine set <bottle> fps <n>
     exec "$SELF" set "${1:-}" fps "${2:-}"
     ;;
   *)

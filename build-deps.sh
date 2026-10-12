@@ -1,5 +1,5 @@
 #!/bin/bash
-# Sestavi x86_64 knihovny (freetype, gmp, nettle, gnutls) pro Wine bezici pod Rosettou.
+# Builds the x86_64 libraries (FreeType, GMP, Nettle, GnuTLS) for Wine running under Rosetta.
 set -euo pipefail
 
 BUILD="${MACWINE_BUILD:-$HOME/macwine-build}"
@@ -19,10 +19,10 @@ HOST="--host=x86_64-apple-darwin"
 
 mkdir -p "$PREFIX" "$BUILD/obj"
 
-build() { # nazev zdrojovy_adresar [configure argumenty...]
+build() { # name source_dir [configure arguments...]
   local name="$1" dir="$2"; shift 2
-  if [ -f "$BUILD/obj/.$name.done" ]; then echo "== $name uz je hotovy"; return; fi
-  echo "== Sestavuji $name"
+  if [ -f "$BUILD/obj/.$name.done" ]; then echo "== $name already built"; return; fi
+  echo "== Building $name"
   rm -rf "$BUILD/obj/$name" && cp -Rp "$dir" "$BUILD/obj/$name" && cd "$BUILD/obj/$name"
   [ -x configure ] || autoreconf -fi
   ./configure $HOST --prefix="$PREFIX" "$@"
@@ -32,7 +32,7 @@ build() { # nazev zdrojovy_adresar [configure argumenty...]
 }
 
 if [ ! -f "$BUILD/obj/.freetype.done" ]; then
-  echo "== Sestavuji freetype"
+  echo "== Building freetype"
   rm -rf "$BUILD/obj/freetype" && mkdir -p "$BUILD/obj/freetype"
   cmake -S "$SRC/freetype" -B "$BUILD/obj/freetype" -G Ninja -DCMAKE_INSTALL_PREFIX="$PREFIX" \
     -DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DCMAKE_BUILD_TYPE=Release \
@@ -42,7 +42,7 @@ if [ ! -f "$BUILD/obj/.freetype.done" ]; then
   touch "$BUILD/obj/.freetype.done"
 fi
 build gmp      "$SRC/gnutls/gmp" --enable-shared --disable-static
-# Zdroje nettle v archivu nemaji Makefile.in, pouzijeme oficialni vydani stejne verze.
+# The archive's Nettle sources lack Makefile.in; use the official release of the same version.
 if [ ! -d "$BUILD/upstream/nettle-3.10" ]; then
   mkdir -p "$BUILD/upstream"
   curl -sfL https://ftp.gnu.org/gnu/nettle/nettle-3.10.tar.gz | tar xz -C "$BUILD/upstream"
@@ -53,4 +53,4 @@ build gnutls   "$SRC/gnutls/gnutls" --enable-shared --disable-static --with-incl
   --disable-doc --disable-tests --disable-tools --disable-cxx --disable-guile --disable-gost \
   NETTLE_LIBS="-lnettle" HOGWEED_LIBS="-lhogweed -lgmp" NETTLE_CFLAGS="-I$PREFIX/include" HOGWEED_CFLAGS="-I$PREFIX/include"
 
-echo "Hotovo: $PREFIX"
+echo "Done: $PREFIX"

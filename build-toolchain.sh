@@ -1,7 +1,7 @@
 #!/bin/bash
-# Sestavi krizovy prekladac mingw-w64 pro Windows cast Wine a DXVK:
-# GCC 13 + binutils 2.41, CRT msvcrt, vlakna POSIX.
-# Novejsi GCC (15/16) prelozi Wine i DXVK jinak (C23, optimalizace) a hry pak zamrzaji / sekaji.
+# Builds the mingw-w64 cross compiler for the Windows side of Wine and DXVK:
+# GCC 13 + binutils 2.41, msvcrt CRT, POSIX threads.
+# Newer GCC (15/16) compiles Wine and DXVK differently (C23, optimizations) and games then freeze or stutter.
 set -euo pipefail
 
 BUILD="${MACWINE_BUILD:-$HOME/macwine-build}"
@@ -9,7 +9,7 @@ PREFIX="$BUILD/toolchain"
 SRC="$BUILD/toolchain-src"
 OBJ="$BUILD/obj/toolchain"
 JOBS="$(sysctl -n hw.ncpu)"
-BINUTILS=2.41 GCC=13.4.0 MINGW=11.0.1  # GCC 13.2 nejde prelozit s libc++ z Xcode 27; 13.4 = stejna rada s opravami
+BINUTILS=2.41 GCC=13.4.0 MINGW=11.0.1  # GCC 13.2 does not build with Xcode 27's libc++; 13.4 = same series with fixes
 BREW=/opt/homebrew/opt
 
 export PATH="$PREFIX/bin:/opt/homebrew/bin:$PATH"
@@ -24,9 +24,9 @@ fetch() { # url
 [ -d "$SRC/gcc-$GCC" ] || fetch "https://ftp.gnu.org/gnu/gcc/gcc-$GCC/gcc-$GCC.tar.xz"
 [ -d "$SRC/mingw-w64-v$MINGW" ] || fetch "https://downloads.sourceforge.net/project/mingw-w64/mingw-w64/mingw-w64-release/mingw-w64-v$MINGW.tar.bz2"
 
-step() { # nazev prikaz...
+step() { # name command...
   local name="$1"; shift
-  if [ -f "$OBJ/.$name.done" ]; then echo "== $name uz je hotovy"; return; fi
+  if [ -f "$OBJ/.$name.done" ]; then echo "== $name already built"; return; fi
   echo "== $name"
   "$@"
   touch "$OBJ/.$name.done"
@@ -49,7 +49,7 @@ for T in x86_64-w64-mingw32 i686-w64-mingw32; do
     "$SRC/mingw-w64-v$MINGW/mingw-w64-headers/configure" --host=$T --prefix="$PREFIX/$T" \
       --with-default-msvcrt=msvcrt
     make install
-    ln -sfn . "$PREFIX/$T/mingw"  # GCC hleda hlavicky v <sysroot>/mingw
+    ln -sfn . "$PREFIX/$T/mingw"  # GCC looks for headers in <sysroot>/mingw
   }
   gcc1() {
     mkdir -p "$OBJ/gcc-$T" && cd "$OBJ/gcc-$T"

@@ -1,8 +1,8 @@
 #!/bin/bash
-# Sestavi Wine 11 ze zdrojoveho archivu jako x86_64 (bezi pod Rosettou, WoW64).
-# Na macOS 27 uz nastroje Xcode nebezi pod Rosettou, proto se kompiluje krizove z arm64:
-#  1) nativni nastroje Wine (winebuild, widl, ...) pro arm64
-#  2) samotne Wine pro x86_64 s pouzitim techto nastroju
+# Builds Wine 11 from the source archive as x86_64 (runs under Rosetta, WoW64).
+# On macOS 27 the Xcode tools no longer run under Rosetta, so Wine is cross-compiled from arm64:
+#  1) native Wine build tools (winebuild, widl, ...) for arm64
+#  2) Wine itself for x86_64, using those tools
 set -euo pipefail
 
 BUILD="${MACWINE_BUILD:-$HOME/macwine-build}"
@@ -13,36 +13,36 @@ OBJ="$BUILD/obj/wine"
 DEST="${MACWINE_DEST:-${MACWINE_BUILD:-$HOME/macwine-build}/runtime}"
 JOBS="$(sysctl -n hw.ncpu)"
 
-# Prekladac pro Windows cast: GCC 13 (build-toolchain.sh)
+# Compiler for the Windows side: GCC 13 (build-toolchain.sh)
 export PATH="$BUILD/toolchain/bin:/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/flex/bin:/opt/homebrew/bin:$PATH"
 export MACOSX_DEPLOYMENT_TARGET=11.0
 
-# 1) Nativni nastroje
+# 1) Native tools
 mkdir -p "$TOOLS"
 if [ ! -f "$TOOLS/tools/sfnt2fon/sfnt2fon" ] || [ ! -f "$TOOLS/.freetype" ]; then
-  echo "== Nativni nastroje Wine"
+  echo "== Native Wine tools"
   cd "$TOOLS"
   export PATH="$PATH:/opt/homebrew/opt/llvm/bin:/opt/homebrew/opt/lld/bin"
   [ -f Makefile ] || "$SRC/configure" --without-gnutls \
     --without-x --without-vulkan --without-opencl --disable-tests
   make -j"$JOBS" __tooldeps__ tools/sfnt2fon/sfnt2fon && touch "$TOOLS/.freetype"
 fi
-# wrc/wmc hledaji locale.nls vedle nastroju; pri sestaveni mimo zdroje tam neni.
+# wrc/wmc look for locale.nls next to the tools; in an out-of-tree build it is not there.
 ln -sf "$SRC/nls/locale.nls" "$TOOLS/nls/locale.nls"
 
-# 2) Wine pro x86_64
-# Configure potrebuje libMoltenVK jen k overeni; Wine si ji za behu nacita samo (dlopen).
-# Proto se MoltenVK sestavuje pred Wine (build-moltenvk.sh).
+# 2) Wine for x86_64
+# configure only needs libMoltenVK for its checks; Wine loads it at run time (dlopen).
+# That is why MoltenVK is built before Wine (build-moltenvk.sh).
 STUB="$BUILD/configure-stub"
 mkdir -p "$STUB"
-MVK="${MOLTENVK_DYLIB:-$DEST/lib/libMoltenVK.dylib}"  # sem instaluje build-moltenvk.sh
-[ -f "$MVK" ] || { echo "Chybi $MVK - nejdriv spust build-moltenvk.sh"; exit 1; }
+MVK="${MOLTENVK_DYLIB:-$DEST/lib/libMoltenVK.dylib}"  # installed here by build-moltenvk.sh
+[ -f "$MVK" ] || { echo "Missing $MVK - run build-moltenvk.sh first"; exit 1; }
 ln -sf "$MVK" "$STUB/libMoltenVK.dylib"
 
 mkdir -p "$OBJ"
 cd "$OBJ"
 if [ ! -f Makefile ]; then
-  echo "== Konfigurace Wine x86_64"
+  echo "== Configuring Wine x86_64"
   CC="clang -arch x86_64" CXX="clang++ -arch x86_64" \
   CFLAGS="-O2 -I$DEPS/include" CROSSCFLAGS="-O2 -std=gnu17" \
   LDFLAGS="-L$DEPS/lib -L$STUB -Wl,-rpath,$DEPS/lib" \
@@ -64,4 +64,4 @@ fi
 [ "${CONFIGURE_ONLY:-}" = 1 ] && exit 0
 make -j"$JOBS"
 make install
-echo "Wine nainstalovano do $DEST"
+echo "Wine installed into $DEST"

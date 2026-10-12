@@ -1,6 +1,6 @@
 #!/bin/bash
-# Zkopiruje x86_64 knihovny (freetype, gnutls, nettle, gmp) do runtime/lib a prepise
-# jejich cesty na @loader_path, aby runtime nezaviselo na adresari se sestavenim.
+# Copies the x86_64 libraries (FreeType, GnuTLS, Nettle, GMP) into runtime/lib and rewrites
+# their paths to @loader_path, so the runtime does not depend on the build folder.
 set -euo pipefail
 
 BUILD="${MACWINE_BUILD:-$HOME/macwine-build}"
@@ -67,11 +67,11 @@ while [ "$changed" = 1 ]; do
     codesign -f -s - "$f" 2>/dev/null || true
   done < <(find "$LIB" "$RT/bin" -type f \( -name '*.dylib' -o -name '*.so' -o -perm +111 \) -not -path '*/x86_64-windows/*' -not -path '*/i386-windows/*' -not -path '*/dxvk/*')
 done
-echo "Knihovny v $LIB:"; ls "$LIB" | grep -v '^wine$\|^dxvk$\|^macwine$' | tr '\n' ' '; echo
+echo "Libraries in $LIB:"; ls "$LIB" | grep -v '^wine$\|^dxvk$\|^macwine$' | tr '\n' ' '; echo
 
-# Verze SDK v binarkach nastavena na macOS SDK 15.1. macOS podle ni zapina
-# "linked-on-or-after" chovani AppKitu/Metalu/CAMetalLayer; se SDK 27 hry zamrzaly pri present.
-# Meni se jen udaj o SDK, ne kod ani minimalni verze macOS.
+# The SDK version in the binaries is set to the macOS 15.1 SDK. macOS uses it to enable
+# "linked-on-or-after" behavior of AppKit/Metal/CAMetalLayer; with SDK 27 games froze on present.
+# Only the SDK field changes, not the code or the minimum macOS version.
 RT="$(dirname "$LIB")"
 SDK_AS=15.1
 for f in "$RT/lib/wine/x86_64-unix/wine" "$RT/bin/wineserver" "$RT"/lib/wine/x86_64-unix/*.so "$LIB/libMoltenVK.dylib"; do
@@ -84,14 +84,14 @@ for f in "$RT/lib/wine/x86_64-unix/wine" "$RT/bin/wineserver" "$RT"/lib/wine/x86
   done
   codesign -f -s - "$f" 2>/dev/null
 done
-echo "Verze SDK nastavena na $SDK_AS"
+echo "SDK version set to $SDK_AS"
 
-# Verze soucasti pro "macwine version"
+# Component versions for "macwine version"
 mkdir -p "$RT/lib/macwine"
 H="$BUILD/sources/moltenvk/MoltenVK/MoltenVK/API/mvk_private_api.h"
 [ -f "$H" ] || H="$BUILD/sources/moltenvk/MoltenVK/MoltenVK/API/vk_mvk_moltenvk.h"
 awk '/#define MVK_VERSION_MAJOR/{a=$3} /#define MVK_VERSION_MINOR/{b=$3} /#define MVK_VERSION_PATCH/{c=$3} END{if(a!="") print a"."b"."c}' "$H" > "$RT/lib/macwine/moltenvk-version"
-# Verzi z gitu jen pokud je MacWine vlastni repozitar (ne podslozka jineho projektu)
+# Version from git only when MacWine is its own repository (not a subfolder of another project)
 SRCDIR="$(cd "$(dirname "$0")" && pwd)"
 if [ "$(git -C "$SRCDIR" rev-parse --show-toplevel 2>/dev/null)" = "$SRCDIR" ]; then
   git -C "$SRCDIR" describe --tags --always --dirty > "$RT/lib/macwine/version"

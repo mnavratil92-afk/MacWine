@@ -1,6 +1,6 @@
-// Vykresli ikonu MacWine (1024x1024 PNG) a logo bez pozadi - vlastni kresba, bez cizich obrazku.
-// Pouziti: swift make-icon.swift <ikona.png> [logo.png]
-//   logo = jen sklenka s jablkem, pruhledne pozadi, sklenka s tmavym okrajem (aby nesplyvala se svetlym panelem)
+// Draws the MacWine icon (1024x1024 PNG) and a logo without background - original artwork, no third-party images.
+// Usage: swift make-icon.swift <icon.png> [logo.png]
+//   logo = just the glass with the apple, transparent background, glass with a dark outline (visible on a light sidebar)
 import AppKit
 
 let size: CGFloat = 1024
@@ -8,7 +8,7 @@ let out = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "icon.png
 let logoOut: String? = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : nil
 
 func draw(_ ctx: CGContext, background: Bool) {
-// Podklad: zaobleny ctverec ve stylu macOS s fialovo-vinovym prechodem
+// Background: macOS-style rounded square with a purple/wine gradient
 if background {
 let inset: CGFloat = 100
 let rect = CGRect(x: inset, y: inset, width: size - 2 * inset, height: size - 2 * inset)
@@ -28,7 +28,7 @@ let grad = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors
 ctx.drawLinearGradient(grad, start: CGPoint(x: 0, y: size - inset), end: CGPoint(x: 0, y: inset), options: [])
 } else { ctx.saveGState() }
 
-// Sklenka s jablkem (vlastni kresba; jablko zamerne neni nakousnute - jine nez logo Apple)
+// Glass with an apple (original drawing; the apple is deliberately not bitten - unlike the Apple logo)
 let cx = size / 2
 let white = NSColor(calibratedWhite: 1, alpha: 0.95).cgColor
 let rgb = CGColorSpaceCreateDeviceRGB()
@@ -42,7 +42,7 @@ bowl.addCurve(to: CGPoint(x: cx, y: bowlBottom), control1: CGPoint(x: cx + 235, 
 bowl.addCurve(to: CGPoint(x: cx - bowlHalf, y: bowlTop), control1: CGPoint(x: cx - 150, y: bowlBottom + 5), control2: CGPoint(x: cx - 235, y: 560))
 bowl.closeSubpath()
 
-// Jablko: stred, polomer, obrys ze dvou zrcadlovych polovin
+// Apple: center, radius, outline made of two mirrored halves
 let ax = cx, ay: CGFloat = 575, ar: CGFloat = 135
 func ap(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: ax + x * ar, y: ay + y * ar) }
 let apple = CGMutablePath()
@@ -55,14 +55,14 @@ apple.addCurve(to: ap(-0.98, 0.30), control1: ap(-0.82, -0.92), control2: ap(-1.
 apple.addCurve(to: ap(0, 0.62), control1: ap(-0.92, 0.88), control2: ap(-0.30, 0.92))
 apple.closeSubpath()
 
-// Jemne zabarveni skla
+// Subtle glass tint
 ctx.saveGState()
 ctx.addPath(bowl); ctx.clip()
 ctx.setFillColor(background ? NSColor(calibratedWhite: 1, alpha: 0.07).cgColor : color(0.42, 0.10, 0.30, 0.10))
 ctx.fill(CGRect(x: 0, y: 0, width: size, height: size))
 ctx.restoreGState()
 
-// Bez pozadi: tmavy okraj kolem cele sklenky (kalich, stopka, podstavec)
+// Without background: dark outline around the whole glass (bowl, stem, base)
 let stemRect = CGRect(x: cx - 14, y: 268, width: 28, height: 140)
 let base = CGPath(roundedRect: CGRect(x: cx - 130, y: 246, width: 260, height: 30), cornerWidth: 15, cornerHeight: 15, transform: nil)
 if !background {
@@ -76,7 +76,7 @@ if !background {
   ctx.restoreGState()
 }
 
-// Stopka a listek jablka
+// Apple stem and leaf
 ctx.saveGState()
 ctx.setStrokeColor(color(0.36, 0.22, 0.12)); ctx.setLineWidth(18); ctx.setLineCap(.round)
 ctx.move(to: ap(0, 0.55)); ctx.addCurve(to: ap(0.10, 1.05), control1: ap(0.02, 0.80), control2: ap(0.04, 0.95)); ctx.strokePath()
@@ -87,7 +87,7 @@ leaf.addCurve(to: ap(0.10, 0.88), control1: ap(0.55, 0.88), control2: ap(0.30, 0
 ctx.addPath(leaf); ctx.setFillColor(color(0.20, 0.62, 0.28)); ctx.fillPath()
 ctx.restoreGState()
 
-// Jablko s prechodem (zelene) a odleskem
+// Apple with a (green) gradient and a highlight
 ctx.saveGState()
 ctx.addPath(apple); ctx.clip()
 let ag = CGGradient(colorsSpace: rgb, colors: [color(0.70, 0.90, 0.32), color(0.30, 0.66, 0.18)] as CFArray, locations: [0, 1])!
@@ -96,7 +96,7 @@ let hl = CGGradient(colorsSpace: rgb, colors: [NSColor(calibratedWhite: 1, alpha
 ctx.drawRadialGradient(hl, startCenter: ap(-0.45, 0.30), startRadius: 0, endCenter: ap(-0.45, 0.30), endRadius: ar * 0.45, options: [])
 ctx.restoreGState()
 
-// Obrys kalichu, odlesk skla
+// Bowl outline, glass highlight
 ctx.setStrokeColor(white); ctx.setLineWidth(24); ctx.setLineJoin(.round)
 ctx.addPath(bowl); ctx.strokePath()
 ctx.saveGState()
@@ -105,7 +105,7 @@ ctx.move(to: CGPoint(x: cx - 175, y: 735)); ctx.addCurve(to: CGPoint(x: cx - 120
 ctx.strokePath()
 ctx.restoreGState()
 
-// Stopka a podstavec sklenky
+// Glass stem and base
 ctx.setFillColor(white)
 ctx.fill(stemRect)
 ctx.addPath(base); ctx.fillPath()
@@ -124,5 +124,5 @@ func render(_ path: String, crop: CGRect, background: Bool) {
   print(path)
 }
 render(out, crop: CGRect(x: 0, y: 0, width: size, height: size), background: true)
-// Logo: vyrez kolem sklenky vcetne okraje
+// Logo: crop around the glass including its outline
 if let logoOut { render(logoOut, crop: CGRect(x: 262, y: 218, width: 500, height: 588), background: false) }

@@ -25,7 +25,7 @@ The interface is in English. The sidebar puts **All Games** and **Stores** first
 
 Installed games have full-color artwork and **Play**. Owned but uninstalled games have grayscale artwork and **Install**. Search and an installed-only filter work across the library. A game remains uninstalled until the local/backend installation state says otherwise; clicking Install does not mark it installed.
 
-Shortcuts can be saved manually or created automatically for installed games (opt-in). The optional **Buy me a coffee** button opens the HTTPS address from `MacWineDonationURL` in Info.plist. Without that setting it shows a short notice. No payment account or placeholder URL is included.
+Shortcuts can be saved manually or created automatically for installed games (opt-in). The **Sponsor MacWine** button opens the project's GitHub Sponsors page (derived from `MacWineRepo` in Info.plist), or the HTTPS address in `MacWineDonationURL` when that is set.
 
 Appearance is selectable in **MacWine → Settings…** (⌘,): **System**, **Light**, or **Dark**, and is remembered between launches. Sidebar buttons navigate directly, highlight the active page, and clear search/filter state when changing sections. Secondary shortcut preferences are in **Library Options**.
 

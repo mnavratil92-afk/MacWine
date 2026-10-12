@@ -1,11 +1,11 @@
 /*
- * exeicon - vytahne nejvetsi ikonu z Windows programu (.exe/.dll) bez Wine.
+ * exeicon - extracts the largest icon from a Windows program (.exe/.dll) without Wine.
  *
- *   exeicon <program.exe> <vystup-bez-pripony>
+ *   exeicon <program.exe> <output-without-extension>
  *
- * Zapise <vystup>.png (ikony 256 px jsou v PE ulozene primo jako PNG) nebo
- * <vystup>.ico (jedna bitmapova ikona), ktere uz umi prevest `sips`.
- * Navratovy kod: 0 = ok, 1 = chyba souboru, 2 = program nema ikonu.
+ * Writes <output>.png (256 px icons are stored in the PE file as PNG) or
+ * <output>.ico (a single bitmap icon) that `sips` can convert.
+ * Exit code: 0 = ok, 1 = file error, 2 = the program has no icon.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -37,7 +37,7 @@ static size_t rva_to_off(uint32_t rva)
     return (size_t)-1;
 }
 
-/* Najde polozku adresare zdroju podle ID (id < 0 = prvni polozka). Vraci offset jejiho cile. */
+/* Finds a resource directory entry by ID (id < 0 = first entry). Returns the offset of its target. */
 static int find_entry(size_t dir, int id, uint32_t *target, int *found_id)
 {
     uint16_t named = u16(dir + 12), ids = u16(dir + 14);
@@ -53,7 +53,7 @@ static int find_entry(size_t dir, int id, uint32_t *target, int *found_id)
     return 0;
 }
 
-/* Projde tri urovne (typ -> jmeno -> jazyk) a vrati data zdroje. */
+/* Walks the three levels (type -> name -> language) and returns the resource data. */
 static uint8_t *get_resource(int type, int name, uint32_t *len)
 {
     uint32_t t, n, l;
@@ -69,7 +69,7 @@ static uint8_t *get_resource(int type, int name, uint32_t *len)
 
 int main(int argc, char **argv)
 {
-    if (argc != 3) { fprintf(stderr, "pouziti: exeicon <program.exe> <vystup-bez-pripony>\n"); return 1; }
+    if (argc != 3) { fprintf(stderr, "usage: exeicon <program.exe> <output-without-extension>\n"); return 1; }
     FILE *f = fopen(argv[1], "rb");
     if (!f) { perror(argv[1]); return 1; }
     fseek(f, 0, SEEK_END); size = (size_t)ftell(f); fseek(f, 0, SEEK_SET);
@@ -77,9 +77,9 @@ int main(int argc, char **argv)
     if (!data || fread(data, 1, size, f) != size) { fclose(f); return 1; }
     fclose(f);
 
-    if (u16(0) != 0x5a4d) { fprintf(stderr, "neni PE soubor\n"); return 1; }
+    if (u16(0) != 0x5a4d) { fprintf(stderr, "not a PE file\n"); return 1; }
     size_t pe = u32(0x3c);
-    if (u32(pe) != 0x4550) { fprintf(stderr, "neni PE soubor\n"); return 1; }
+    if (u32(pe) != 0x4550) { fprintf(stderr, "not a PE file\n"); return 1; }
     nsections = u16(pe + 6);
     uint16_t optsize = u16(pe + 20);
     size_t opt = pe + 24;
@@ -96,7 +96,7 @@ int main(int argc, char **argv)
     rsrc_off = rva_to_off(rsrc_rva);
     if (rsrc_off == (size_t)-1) return 2;
 
-    /* Prvni skupina ikon (hlavni ikona programu). */
+    /* First icon group (the main program icon). */
     uint32_t t, g;
     if (!find_entry(rsrc_off, RT_GROUP_ICON, &t, NULL) || !(t & 0x80000000)) return 2;
     if (!find_entry(rsrc_off + (t & 0x7fffffff), -1, &g, NULL) || !(g & 0x80000000)) return 2;
@@ -107,7 +107,7 @@ int main(int argc, char **argv)
     if (grp == (size_t)-1) return 2;
     uint16_t count = u16(grp + 4);
 
-    /* Vyber nejvetsi ikonu (sirka 0 znamena 256), pri shode vyssi barevnou hloubku. */
+    /* Pick the largest icon (width 0 means 256); on a tie, the higher color depth. */
     int best = -1, best_w = 0, best_bpp = 0;
     for (int i = 0; i < count; i++) {
         size_t e = grp + 6 + i * 14;
@@ -127,7 +127,7 @@ int main(int argc, char **argv)
     FILE *o = fopen(path, "wb");
     if (!o) { perror(path); return 1; }
     if (!is_png) {
-        /* ICO hlavicka s jednou polozkou; data obrazku nasleduji hned za ni (offset 22). */
+        /* ICO header with one entry; the image data follows right after it (offset 22). */
         uint8_t hdr[22] = { 0, 0, 1, 0, 1, 0 };
         memcpy(hdr + 6, data + e, 12);
         hdr[18] = 22; hdr[19] = hdr[20] = hdr[21] = 0;
