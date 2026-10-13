@@ -1,7 +1,7 @@
 diff -ru a/dlls/wined3d/swapchain.c b/dlls/wined3d/swapchain.c
 --- a/dlls/wined3d/swapchain.c	2026-10-13 17:34:55
-+++ b/dlls/wined3d/swapchain.c	2026-10-13 18:02:21
-@@ -211,6 +211,165 @@
++++ b/dlls/wined3d/swapchain.c	2026-10-13 18:07:25
+@@ -211,6 +211,174 @@
          WARN("Failed to retrieve device context, trying swapchain backup.\n");
  }
  
@@ -101,7 +101,7 @@ diff -ru a/dlls/wined3d/swapchain.c b/dlls/wined3d/swapchain.c
 +    GLfloat clear[4];
 +    GLboolean mask[4], scissor;
 +    LARGE_INTEGER now;
-+    char text[8];
++    char text[16];
 +
 +    QueryPerformanceCounter(&now);
 +    if (!freq)
@@ -126,7 +126,7 @@ diff -ru a/dlls/wined3d/swapchain.c b/dlls/wined3d/swapchain.c
 +    u = height / 240; /* digit size follows the window: 7u tall */
 +    if (u < 2) u = 2;
 +
-+    count = snprintf(text, sizeof(text), "%u", shown > 9999 ? 9999 : shown);
++    count = snprintf(text, sizeof(text), "%u FPS", shown > 9999 ? 9999 : shown);
 +    scissor = gl->gl.p_glIsEnabled(GL_SCISSOR_TEST);
 +    gl->gl.p_glGetIntegerv(GL_SCISSOR_BOX, box);
 +    gl->gl.p_glGetFloatv(GL_COLOR_CLEAR_VALUE, clear);
@@ -144,12 +144,21 @@ diff -ru a/dlls/wined3d/swapchain.c b/dlls/wined3d/swapchain.c
 +    gl->gl.p_glClearColor(1.0f, 0.85f, 0.2f, 1.0f);
 +    for (n = 0; n < count; ++n)
 +    {
-+        unsigned char seg = digits[text[n] - '0'];
-+        GLint dx = x + (2 + 6 * n) * u, dy = y + 2 * u; /* digit cell: 4u wide, 7u tall */
 +        static const GLint rects[7][4] = /* x, y, w, h in units, y from the bottom of the digit */
 +        {
 +            {0, 6, 4, 1}, {3, 3, 1, 4}, {3, 0, 1, 4}, {0, 0, 4, 1}, {0, 0, 1, 4}, {0, 3, 1, 4}, {0, 3, 4, 1},
 +        };
++        GLint dx = x + (2 + 6 * n) * u, dy = y + 2 * u; /* digit cell: 4u wide, 7u tall */
++        unsigned char seg;
++
++        switch (text[n])
++        {
++            case 'F': seg = 0x71; break; /* a e f g */
++            case 'P': seg = 0x73; break; /* a b e f g */
++            case 'S': seg = 0x6d; break; /* like 5 */
++            case ' ': continue;
++            default:  seg = digits[text[n] - '0']; break;
++        }
 +        for (i = 0; i < 7; ++i)
 +        {
 +            if (!(seg & (1 << i))) continue;
@@ -167,7 +176,7 @@ diff -ru a/dlls/wined3d/swapchain.c b/dlls/wined3d/swapchain.c
  HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
          const RECT *src_rect, const RECT *dst_rect, HWND dst_window_override,
          unsigned int swap_interval, uint32_t flags)
-@@ -225,6 +384,8 @@
+@@ -225,6 +393,8 @@
      if (flags)
          FIXME("Ignoring flags %#x.\n", flags);
  
@@ -176,7 +185,7 @@ diff -ru a/dlls/wined3d/swapchain.c b/dlls/wined3d/swapchain.c
      wined3d_mutex_lock();
  
      if (!swapchain->back_buffers)
-@@ -646,6 +807,9 @@
+@@ -646,6 +816,9 @@
          wined3d_texture_load_location(back_buffer, 0, context, back_buffer->resource.draw_binding);
  
          swapchain_blit(swapchain, context, src_rect, dst_rect);
