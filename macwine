@@ -25,6 +25,8 @@
 #   macwine set <bottle> <key> <value>              fps <n|0>, graphics dxvk|wined3d|d3dmetal,
 #                                                   windows win11|win10|win7, hud 0|1
 #   macwine components list|install <bottle> <id...> Windows components (.NET, Visual C++, DirectX...)
+#   macwine dsoal <bottle> on|off|status <program.exe> better sound for older DirectSound games (DSOAL)
+#   macwine fpscounter <bottle> on|off|status <program.exe> FPS number in the corner for one game
 #   macwine cfg <bottle>                            Wine configuration (winecfg)
 #   macwine kill <bottle>                           stop all processes in a bottle
 #   macwine version [--json]                        component versions
@@ -168,7 +170,7 @@ setup_env() { # bottle
     export DYLD_FALLBACK_FRAMEWORK_PATH="$D3DM_GPTK/external"
   fi
   export WINESERVER
-  export WINEMSYNC=1
+  export WINEMSYNC="${WINEMSYNC:-1}"   # msync (fast synchronization); WINEMSYNC=0 falls back to wineserver
   export ROSETTA_ADVERTISE_AVX="${ROSETTA_ADVERTISE_AVX-1}"  # report AVX under Rosetta (newer games and Chromium require it)
   export WINEDEBUG="${WINEDEBUG:--all}"
   export DYLD_FALLBACK_LIBRARY_PATH="${MACWINE_MVK_DIR:+$MACWINE_MVK_DIR:}$RUNTIME/lib:/usr/lib"
@@ -686,6 +688,38 @@ gog_info_file() { # bottle id -> goggame-<id>.info of the installed game (or emp
   find "$BOTTLES/$1/drive_c" -maxdepth 6 -name "goggame-$2.info" 2>/dev/null | head -1
 }
 
+# --- Better sound for older games: DSOAL (DirectSound on OpenAL Soft, LGPL: github.com/kcat/dsoal) ---
+# Wine's DirectSound makes many older games (FlatOut, Medal of Honor: Airborne, ...) sound metallic and choppy
+# under Rosetta. DSOAL replaces DirectSound for one game only: its dsound.dll goes next to the game's .exe and
+# only that .exe loads it (AppDefaults), so no other game is affected.
+DSOAL_VERSION=r697
+DSOAL_SHA256=515d70aa23179595de9d7a909b5ada99676c78d6568d5af27b7101daabad7e5e
+DSOAL_URL="https://github.com/kcat/dsoal/releases/download/archive/DSOAL_$DSOAL_VERSION.zip"
+
+dsoal_dir() { # downloads the pinned DSOAL build on first use -> folder with Win32/ and Win64/
+  local dir="$MACWINE_HOME/tools/dsoal-$DSOAL_VERSION" tmp
+  if [ ! -f "$dir/Win32/dsound.dll" ] || [ ! -f "$dir/Win64/dsound.dll" ]; then
+    mkdir -p "$MACWINE_HOME/tools"; tmp="$(mktemp -d "$MACWINE_HOME/tools/.dsoal.XXXXXX")"
+    echo "Downloading DSOAL $DSOAL_VERSION..." >&2
+    curl -fsL --retry 3 -o "$tmp/dsoal.zip" "$DSOAL_URL" || { rm -rf "$tmp"; die "DSOAL download failed"; }
+    [ "$(shasum -a 256 "$tmp/dsoal.zip" | cut -d' ' -f1)" = "$DSOAL_SHA256" ] || { rm -rf "$tmp"; die "DSOAL checksum mismatch - download refused"; }
+    # the release archive wraps the build archive
+    unzip -q -o "$tmp/dsoal.zip" -d "$tmp/outer" && unzip -q -o "$tmp/outer/DSOAL_$DSOAL_VERSION.zip" 'DSOAL/*' -d "$tmp/inner" \
+      || { rm -rf "$tmp"; die "DSOAL archive could not be unpacked"; }
+    rm -rf "$dir"; mkdir -p "$dir"
+    cp -R "$tmp/inner/DSOAL/Win32" "$tmp/inner/DSOAL/Win64" "$tmp/inner/DSOAL/Documentation" "$dir/"
+    rm -rf "$tmp"
+  fi
+  echo "$dir"
+}
+
+pe_arch() { # program.exe -> win32 | win64 | (empty)
+  local off m
+  off="$(od -An -t u4 -j 60 -N 4 "$1" 2>/dev/null | tr -d ' ')"; [ -n "$off" ] || return 0
+  m="$(od -An -t x2 -j $((off + 4)) -N 2 "$1" 2>/dev/null | tr -d ' ')"
+  case "$m" in 014c) echo win32 ;; 8664) echo win64 ;; esac
+}
+
 # --- Windows components (winetricks, LGPL: github.com/Winetricks/winetricks) ---
 WINETRICKS_VERSION=20260125
 WINETRICKS_SHA256=431f82fc74000e6c864409f1d8fb495d696c03928808e3e8acffc45179312a7b
@@ -1201,6 +1235,79 @@ EOF
         [ "$JSON" = 1 ] && echo '{"installed":true}' || echo "D3DMetal imported. Enable it per bottle: macwine set <bottle> graphics d3dmetal" ;;
       *) die "usage: macwine d3dmetal status | import <Game Porting Toolkit .dmg or folder>" ;;
     esac
+    ;;
+  dsoal)
+    # macwine dsoal <bottle> on|off|status <program.exe>
+    need_bottle "${1:-}"; b="$1"; action="${2:-}"; prog="${3:-}"
+    [ -n "$prog" ] || die "usage: macwine dsoal <bottle> on|off|status <program.exe>"
+    WINEPREFIX="$BOTTLES/$b"; exe="$(unix_path "$prog")"
+    [ -f "$exe" ] || die "program not found: $prog"
+    gdir="$(dirname "$exe")"; name="$(basename "$exe")"
+    key="HKCU\\Software\\Wine\\AppDefaults\\$name\\DllOverrides"
+    setup_env "$b"
+    enabled() {
+      [ -f "$gdir/dsoal-aldrv.dll" ] && [ -f "$gdir/dsound.dll" ] && \
+        "$WINE" reg query "$key" /v dsound 2>/dev/null | grep -q "native,builtin"
+    }
+    case "$action" in
+      on)
+        arch="$(pe_arch "$exe")"; [ -n "$arch" ] || die "not a Windows program: $prog"
+        src="$(dsoal_dir)/$([ "$arch" = win64 ] && echo Win64 || echo Win32)"
+        if [ -f "$gdir/dsound.dll" ] && ! cmp -s "$gdir/dsound.dll" "$src/dsound.dll"; then
+          die "the game already ships its own dsound.dll - not replacing it"
+        fi
+        cp "$src/dsound.dll" "$src/dsoal-aldrv.dll" "$gdir/"
+        "$WINE" reg add "$key" /v dsound /d native,builtin /f >/dev/null 2>&1 || die "could not write the registry"
+        bottle_running "$b" || "$WINESERVER" -w
+        ;;
+      off)
+        src="$MACWINE_HOME/tools/dsoal-$DSOAL_VERSION"
+        for f in dsound.dll dsoal-aldrv.dll; do
+          # remove only DSOAL's own files, never a DLL the game shipped
+          if [ -f "$gdir/$f" ] && { cmp -s "$gdir/$f" "$src/Win32/$f" || cmp -s "$gdir/$f" "$src/Win64/$f"; }; then rm -f "$gdir/$f"; fi
+        done
+        "$WINE" reg delete "$key" /v dsound /f >/dev/null 2>&1 || true
+        bottle_running "$b" || "$WINESERVER" -w
+        ;;
+      status) ;;
+      *) die "usage: macwine dsoal <bottle> on|off|status <program.exe>" ;;
+    esac
+    if enabled; then st=true; else st=false; fi
+    [ "$JSON" = 1 ] && printf '{"dsoal":%s}\n' "$st" || echo "DSOAL for $name: $([ "$st" = true ] && echo on || echo off)"
+    ;;
+  fpscounter)
+    # macwine fpscounter <bottle> on|off|status <program.exe> - FPS number in the corner for one game
+    #   DirectX 10/11 (DXVK): "dxvk.hud = fps" in dxvk.conf next to the game; DirectX 9 (Wine's Direct3D):
+    #   MacWineShowFPS=1 in HKCU\Software\Wine\AppDefaults\<game.exe>\Direct3D (patches/wine-macwine-wined3d.patch)
+    need_bottle "${1:-}"; b="$1"; action="${2:-}"; prog="${3:-}"
+    [ -n "$prog" ] || die "usage: macwine fpscounter <bottle> on|off|status <program.exe>"
+    WINEPREFIX="$BOTTLES/$b"; exe="$(unix_path "$prog")"
+    [ -f "$exe" ] || die "program not found: $prog"
+    gdir="$(dirname "$exe")"; name="$(basename "$exe")"; conf="$gdir/dxvk.conf"; marker="# MacWine: FPS counter"
+    key="HKCU\\Software\\Wine\\AppDefaults\\$name\\Direct3D"
+    setup_env "$b"
+    case "$action" in
+      on)
+        "$WINE" reg add "$key" /v MacWineShowFPS /t REG_DWORD /d 1 /f >/dev/null 2>&1 || die "could not write the registry"
+        if ! grep -q "^[[:space:]]*dxvk.hud[[:space:]]*=" "$conf" 2>/dev/null; then
+          printf '%s\ndxvk.hud = fps\n' "$marker" >> "$conf"
+        fi
+        bottle_running "$b" || "$WINESERVER" -w
+        ;;
+      off)
+        "$WINE" reg delete "$key" /v MacWineShowFPS /f >/dev/null 2>&1 || true
+        if [ -f "$conf" ]; then
+          # remove only MacWine's own two lines; delete the file if nothing else is left
+          awk -v m="$marker" '$0 == m {skip = 1; next} skip && /^dxvk.hud = fps$/ {skip = 0; next} {skip = 0; print}' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+          [ -s "$conf" ] || rm -f "$conf"
+        fi
+        bottle_running "$b" || "$WINESERVER" -w
+        ;;
+      status) ;;
+      *) die "usage: macwine fpscounter <bottle> on|off|status <program.exe>" ;;
+    esac
+    if "$WINE" reg query "$key" /v MacWineShowFPS 2>/dev/null | grep -q "0x1"; then st=true; else st=false; fi
+    [ "$JSON" = 1 ] && printf '{"fpscounter":%s}\n' "$st" || echo "FPS counter for $name: $([ "$st" = true ] && echo on || echo off)"
     ;;
   components)
     sub="${1:-list}"

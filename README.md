@@ -17,7 +17,8 @@ MacWine is a free, open-source macOS app built on [Wine](https://www.winehq.org)
 - **Game shortcuts** as Mac apps (Dock, Launchpad, Desktop), with the game's icon or your own image.
 - **Community compatibility ratings** (0–5 stars) shared by all MacWine users through GitHub Discussions.
 - **Windows components** (Visual C++, .NET, DirectX libraries, fonts…) installable per bottle.
-- **Performance settings** per bottle: FPS limit, performance HUD, graphics backend.
+- **Per-game options:** FPS counter, *Better sound for older games* (DSOAL – fixes metallic or choppy DirectSound audio), open the game's folder.
+- **Performance settings** per bottle: FPS limit (also for DirectX 9 games), performance HUD, graphics backend.
 - **Automatic updates** (Sparkle).
 
 MacWine never asks for your store passwords: you sign in on the store's own web page or in its own launcher. Sign-in tokens stay on your Mac.
@@ -103,6 +104,7 @@ Each script keeps its state in `$MACWINE_BUILD/obj`; use a fresh build folder fo
 
 - `wine-macwine-compat.patch` – per-program compatibility rules read from `HKCU\Software\MacWine\Compat` (extra arguments for Chromium-based launchers such as Steam, Rockstar and Ubisoft Connect, and similar fixes).
 - `wine-macwine-username.patch` – the Windows user is always called `macwine`, so bottles can move between Macs.
+- `wine-macwine-wined3d.patch` – FPS limit and an optional FPS counter for games that use Wine's own Direct3D (DirectX 9 and older).
 - `moltenvk-defaults.patch` – MoltenVK defaults tuned for games under Wine.
 - `dxvk-mingw14.patch` – builds DXVK with the mingw-w64 toolchain above.
 

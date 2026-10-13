@@ -138,6 +138,32 @@ struct GameDetailView: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.dismiss) var dismiss
     @State private var rating = false
+    @State private var dsoal: Bool?        // nil = unknown / not applicable
+    @State private var dsoalBusy = false
+    @State private var dsoalError: String?
+    private struct DsoalStatus: Decodable { let dsoal: Bool }
+    private struct FpsStatus: Decodable { let fpscounter: Bool }
+    @State private var fpsCounter: Bool?
+    private var fpsBinding: Binding<Bool> {
+        Binding(get: { fpsCounter ?? false }, set: { on in Task { await setFpsCounter(on) } })
+    }
+    func setFpsCounter(_ on: Bool) async {
+        guard let exe = game.executable else { return }
+        dsoalBusy = true; dsoalError = nil
+        do { fpsCounter = try await model.cli.decode(FpsStatus.self, ["fpscounter", game.bottle, on ? "on" : "off", exe, "--json"]).fpscounter }
+        catch { dsoalError = error.localizedDescription }
+        dsoalBusy = false
+    }
+    private var dsoalBinding: Binding<Bool> {
+        Binding(get: { dsoal ?? false }, set: { on in Task { await setDsoal(on) } })
+    }
+    func setDsoal(_ on: Bool) async {
+        guard let exe = game.executable else { return }
+        dsoalBusy = true; dsoalError = nil
+        do { dsoal = try await model.cli.decode(DsoalStatus.self, ["dsoal", game.bottle, on ? "on" : "off", exe, "--json"]).dsoal }
+        catch { dsoalError = error.localizedDescription }
+        dsoalBusy = false
+    }
     var body: some View {
         HStack(alignment: .top, spacing: 26) {
             GameArt(game: game).frame(width: 155)
@@ -156,6 +182,20 @@ struct GameDetailView: View {
                     if model.customArtwork(game) != nil { Button("Remove Image") { model.removeArtwork(game) } }
                 }
                 Text("Your own cover for games without one. Also used as the shortcut icon.").font(.caption).foregroundStyle(.secondary)
+                if game.installed, let exe = game.executable {
+                    Button("Show Game Folder") {
+                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: exe)])
+                    }.disabled(!FileManager.default.fileExists(atPath: exe))
+                }
+                if game.installed, game.executable != nil, fpsCounter != nil {
+                    Toggle("Show FPS counter", isOn: fpsBinding).disabled(dsoalBusy || model.busy)
+                }
+                if game.installed, game.executable != nil, dsoal != nil {
+                    Toggle("Better sound for older games", isOn: dsoalBinding).disabled(dsoalBusy || model.busy)
+                    Text("Turn on if the sound is choppy or metallic. Replaces DirectSound for this game only (DSOAL, OpenAL Soft).")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    if let dsoalError { Text(dsoalError).font(.caption).foregroundStyle(.red) }
+                }
                 Divider()
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Community rating").font(.headline)
@@ -178,6 +218,11 @@ struct GameDetailView: View {
             }
         }.padding(30).frame(width: 600)
         .sheet(isPresented: $rating) { RateGameView(game: game) }
+        .task(id: game.id) {
+            guard game.installed, let exe = game.executable else { return }
+            dsoal = (try? await model.cli.decode(DsoalStatus.self, ["dsoal", game.bottle, "status", exe, "--json"]))?.dsoal
+            fpsCounter = (try? await model.cli.decode(FpsStatus.self, ["fpscounter", game.bottle, "status", exe, "--json"]))?.fpscounter
+        }
     }
 }
 

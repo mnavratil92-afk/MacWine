@@ -1,0 +1,188 @@
+diff -ru a/dlls/wined3d/swapchain.c b/dlls/wined3d/swapchain.c
+--- a/dlls/wined3d/swapchain.c	2026-10-13 17:34:55
++++ b/dlls/wined3d/swapchain.c	2026-10-13 18:02:21
+@@ -211,6 +211,165 @@
+         WARN("Failed to retrieve device context, trying swapchain backup.\n");
+ }
+ 
++/* MacWine: optional frame rate limit for Direct3D 9 and older games (DXVK has its own for 10/11).
++ * Uses the same setting as DXVK: DXVK_FRAME_RATE=<fps> (MacWine sets it from the bottle's FPS limit).
++ * Without a limit old games render as fast as possible, starving the audio threads under Rosetta. */
++static void macwine_limit_frame_rate(void)
++{
++    static LONGLONG freq, next;
++    static int fps = -1;
++    LARGE_INTEGER now;
++    LONGLONG interval;
++
++    if (fps < 0)
++    {
++        char buf[16];
++        LARGE_INTEGER f;
++        DWORD len = GetEnvironmentVariableA("DXVK_FRAME_RATE", buf, sizeof(buf));
++        fps = (len && len < sizeof(buf)) ? atoi(buf) : 0;
++        if (fps < 0 || fps > 1000) fps = 0;
++        QueryPerformanceFrequency(&f);
++        freq = f.QuadPart;
++        if (fps) TRACE("Frame rate limited to %d fps.\n", fps);
++    }
++    if (!fps || !freq) return;
++
++    interval = freq / fps;
++    QueryPerformanceCounter(&now);
++    if (!next || now.QuadPart - next > interval * 4)
++    {
++        /* first frame, or far behind (loading screen): start a new schedule */
++        next = now.QuadPart + interval;
++        return;
++    }
++    if (now.QuadPart < next)
++    {
++        LONGLONG wait_ms = (next - now.QuadPart) * 1000 / freq;
++        if (wait_ms > 1) Sleep((DWORD)(wait_ms - 1));
++        do QueryPerformanceCounter(&now); while (now.QuadPart < next);
++    }
++    next += interval;
++}
++
++/* MacWine: small FPS counter for Direct3D 9 and older games (DXVK games use DXVK's HUD).
++ * Enabled per game with the DWORD/string value "MacWineShowFPS"=1 in
++ * HKCU\Software\Wine\AppDefaults\<game.exe>\Direct3D (or globally in HKCU\Software\Wine\Direct3D).
++ * Drawn as seven-segment digits with scissored clears into the window's framebuffer right before
++ * SwapBuffers: no shaders, textures or GL state that wined3d tracks are left changed. */
++static int macwine_fps_enabled = -1;
++
++static BOOL macwine_reg_flag(HKEY root, const char *path, const char *name)
++{
++    char buf[16];
++    DWORD type, size = sizeof(buf);
++    HKEY key;
++    BOOL ret = FALSE;
++
++    if (RegOpenKeyA(root, path, &key)) return FALSE;
++    if (!RegQueryValueExA(key, name, NULL, &type, (BYTE *)buf, &size))
++    {
++        if (type == REG_DWORD && size == sizeof(DWORD)) ret = *(DWORD *)buf != 0;
++        else if (type == REG_SZ) ret = buf[0] == '1' || buf[0] == 'y' || buf[0] == 'Y';
++    }
++    RegCloseKey(key);
++    return ret;
++}
++
++static BOOL macwine_show_fps(void)
++{
++    if (macwine_fps_enabled < 0)
++    {
++        char path[MAX_PATH + 64], exe[MAX_PATH], *name;
++        DWORD len = GetModuleFileNameA(NULL, exe, sizeof(exe));
++
++        macwine_fps_enabled = 0;
++        if (len && len < sizeof(exe))
++        {
++            name = strrchr(exe, '\\');
++            name = name ? name + 1 : exe;
++            snprintf(path, sizeof(path), "Software\\Wine\\AppDefaults\\%s\\Direct3D", name);
++            macwine_fps_enabled = macwine_reg_flag(HKEY_CURRENT_USER, path, "MacWineShowFPS");
++        }
++        if (!macwine_fps_enabled)
++            macwine_fps_enabled = macwine_reg_flag(HKEY_CURRENT_USER, "Software\\Wine\\Direct3D", "MacWineShowFPS");
++    }
++    return macwine_fps_enabled;
++}
++
++static void macwine_draw_fps(const struct wined3d_gl_info *gl_info, const RECT *dst_rect)
++{
++    /* segments: a=top b=top-right c=bottom-right d=bottom e=bottom-left f=top-left g=middle */
++    static const unsigned char digits[10] = {0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f};
++    static LONGLONG freq, last;
++    static unsigned int frames, shown;
++    const struct wined3d_gl_funcs *gl = &gl_info->gl_ops;
++    GLint fb = 0, box[4], height, u = 3, x, y, i, n, count;
++    GLfloat clear[4];
++    GLboolean mask[4], scissor;
++    LARGE_INTEGER now;
++    char text[8];
++
++    QueryPerformanceCounter(&now);
++    if (!freq)
++    {
++        LARGE_INTEGER f;
++        QueryPerformanceFrequency(&f);
++        freq = f.QuadPart;
++        last = now.QuadPart;
++    }
++    ++frames;
++    if (now.QuadPart - last >= freq / 2)
++    {
++        shown = (unsigned int)((frames * freq + (now.QuadPart - last) / 2) / (now.QuadPart - last));
++        frames = 0;
++        last = now.QuadPart;
++    }
++
++    gl->gl.p_glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &fb);
++    if (fb) return; /* only draw into the window itself */
++    height = dst_rect->bottom - dst_rect->top;
++    if (height < 60) return;
++    u = height / 240; /* digit size follows the window: 7u tall */
++    if (u < 2) u = 2;
++
++    count = snprintf(text, sizeof(text), "%u", shown > 9999 ? 9999 : shown);
++    scissor = gl->gl.p_glIsEnabled(GL_SCISSOR_TEST);
++    gl->gl.p_glGetIntegerv(GL_SCISSOR_BOX, box);
++    gl->gl.p_glGetFloatv(GL_COLOR_CLEAR_VALUE, clear);
++    gl->gl.p_glGetBooleanv(GL_COLOR_WRITEMASK, mask);
++
++    gl->gl.p_glEnable(GL_SCISSOR_TEST);
++    gl->gl.p_glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
++
++    /* background box, top-left corner */
++    x = 8; y = height - 8 - 11 * u;
++    gl->gl.p_glScissor(x, y, (6 * count + 2) * u, 11 * u);
++    gl->gl.p_glClearColor(0.0f, 0.0f, 0.0f, 0.7f);
++    gl->gl.p_glClear(GL_COLOR_BUFFER_BIT);
++
++    gl->gl.p_glClearColor(1.0f, 0.85f, 0.2f, 1.0f);
++    for (n = 0; n < count; ++n)
++    {
++        unsigned char seg = digits[text[n] - '0'];
++        GLint dx = x + (2 + 6 * n) * u, dy = y + 2 * u; /* digit cell: 4u wide, 7u tall */
++        static const GLint rects[7][4] = /* x, y, w, h in units, y from the bottom of the digit */
++        {
++            {0, 6, 4, 1}, {3, 3, 1, 4}, {3, 0, 1, 4}, {0, 0, 4, 1}, {0, 0, 1, 4}, {0, 3, 1, 4}, {0, 3, 4, 1},
++        };
++        for (i = 0; i < 7; ++i)
++        {
++            if (!(seg & (1 << i))) continue;
++            gl->gl.p_glScissor(dx + rects[i][0] * u, dy + rects[i][1] * u, rects[i][2] * u, rects[i][3] * u);
++            gl->gl.p_glClear(GL_COLOR_BUFFER_BIT);
++        }
++    }
++
++    gl->gl.p_glClearColor(clear[0], clear[1], clear[2], clear[3]);
++    gl->gl.p_glColorMask(mask[0], mask[1], mask[2], mask[3]);
++    gl->gl.p_glScissor(box[0], box[1], box[2], box[3]);
++    if (!scissor) gl->gl.p_glDisable(GL_SCISSOR_TEST);
++}
++
+ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
+         const RECT *src_rect, const RECT *dst_rect, HWND dst_window_override,
+         unsigned int swap_interval, uint32_t flags)
+@@ -225,6 +384,8 @@
+     if (flags)
+         FIXME("Ignoring flags %#x.\n", flags);
+ 
++    macwine_limit_frame_rate();
++
+     wined3d_mutex_lock();
+ 
+     if (!swapchain->back_buffers)
+@@ -646,6 +807,9 @@
+         wined3d_texture_load_location(back_buffer, 0, context, back_buffer->resource.draw_binding);
+ 
+         swapchain_blit(swapchain, context, src_rect, dst_rect);
++
++        if (macwine_show_fps())
++            macwine_draw_fps(gl_info, dst_rect);
+ 
+         if (swapchain->device->context_count > 1)
+         {
