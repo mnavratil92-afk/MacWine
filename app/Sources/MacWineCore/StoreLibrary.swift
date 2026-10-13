@@ -46,7 +46,8 @@ public enum LibraryMerge {
                 let found = output[i]
                 output[i] = Game(bottle: target, store: store, storeID: item.id, name: item.name,
                                  installed: found.installed || item.installed,
-                                 executable: found.executable ?? item.executable, artworkURL: item.artworkURL ?? found.artworkURL)
+                                 // the backend knows the store's real launch file; the local scan only guesses (largest .exe)
+                                 executable: item.executable ?? found.executable, artworkURL: item.artworkURL ?? found.artworkURL)
             } else {
                 output.append(Game(bottle: target, store: store, storeID: item.id, name: item.name,
                                    installed: item.installed, executable: item.executable, artworkURL: item.artworkURL))

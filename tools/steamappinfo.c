@@ -1,10 +1,11 @@
 /*
  * steamappinfo - reads Steam's appcache/appinfo.vdf (binary format v28/v29) without Steam running.
  *
- *   steamappinfo <appinfo.vdf> [appid...]
+ *   steamappinfo <appinfo.vdf> [appid...]        "appid<TAB>type<TAB>name"
+ *   steamappinfo -l <appinfo.vdf> [appid...]     "appid<TAB>executable" - the first Windows launch option
+ *                                                (relative to the game's install folder, as Steam stores it)
  *
- * Prints "appid<TAB>type<TAB>name" for the given app IDs (or for all apps when none are given).
- * Only the "common" section is decoded (name, type). Exit 1 = unreadable / unsupported file.
+ * Prints one line per given app ID (or for all apps when none are given). Exit 1 = unreadable / unsupported file.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -27,24 +28,39 @@ static const char *key(size_t *p)
     const char *s = (const char *)buf + *p; *p += strlen(s) + 1; return s;
 }
 
-/* Walks a binary KeyValues object. Fills name/type when inside common (depth tracking via flags). */
-static int walk(size_t *p, size_t end, int in_common, const char **name, const char **type)
+/* Launch options: config/launch/<n>/executable and config/launch/<n>/config/oslist */
+#define MAX_LAUNCH 16
+struct launch { const char *exe; const char *oslist; };
+static struct launch launches[MAX_LAUNCH];
+
+/* Walks a binary KeyValues object. path[0..depth) are the enclosing keys. Collects common/name, common/type
+ * and the launch options. Returns 1 on an unknown value type (stop this entry). */
+static int walk(size_t *p, size_t end, const char **path, int depth, const char **name, const char **type)
 {
     while (*p < end) {
         uint8_t t = buf[(*p)++];
         if (t == 8) return 0;                        /* end of object */
         const char *k = key(p);
         switch (t) {
-        case 0: {                                    /* nested object */
-            int c = !in_common && !strcmp(k, "common");
-            if (walk(p, end, c, name, type)) return 1;
+        case 0:                                      /* nested object */
+            if (depth < 8) path[depth] = k;
+            if (walk(p, end, path, depth + 1, name, type)) return 1;
             break;
-        }
         case 1: {                                    /* string */
             const char *v = (const char *)buf + *p;
             size_t l = strnlen(v, end - *p);
-            if (in_common && !strcmp(k, "name")) *name = v;
-            if (in_common && !strcmp(k, "type")) *type = v;
+            /* the entry's root object is "appinfo", so sections start at depth 1 */
+            if (depth == 2 && !strcmp(path[1], "common")) {
+                if (!strcmp(k, "name")) *name = v;
+                if (!strcmp(k, "type")) *type = v;
+            }
+            if (depth >= 4 && depth <= 5 && !strcmp(path[1], "config") && !strcmp(path[2], "launch")) {
+                int n = atoi(path[3]);
+                if (n >= 0 && n < MAX_LAUNCH) {
+                    if (depth == 4 && !strcmp(k, "executable")) launches[n].exe = v;
+                    if (depth == 5 && !strcmp(path[4], "config") && !strcmp(k, "oslist")) launches[n].oslist = v;
+                }
+            }
             *p += l + 1;
             break;
         }
@@ -58,7 +74,9 @@ static int walk(size_t *p, size_t end, int in_common, const char **name, const c
 
 int main(int argc, char **argv)
 {
-    if (argc < 2) { fprintf(stderr, "usage: steamappinfo <appinfo.vdf> [appid...]\n"); return 1; }
+    int launch_mode = argc > 1 && !strcmp(argv[1], "-l");
+    if (launch_mode) { argv++; argc--; }
+    if (argc < 2) { fprintf(stderr, "usage: steamappinfo [-l] <appinfo.vdf> [appid...]\n"); return 1; }
     FILE *f = fopen(argv[1], "rb");
     if (!f) { perror(argv[1]); return 1; }
     fseek(f, 0, SEEK_END); len = (size_t)ftell(f); fseek(f, 0, SEEK_SET);
@@ -91,10 +109,21 @@ int main(int argc, char **argv)
         int wanted = argc == 2;
         for (int i = 2; i < argc && !wanted; i++) wanted = (uint32_t)strtoul(argv[i], NULL, 10) == appid;
         if (wanted && kv < next && next <= end) {
-            const char *name = "", *type = "";
+            const char *name = "", *type = "", *path[8];
             size_t q = kv;
-            walk(&q, next, 0, &name, &type);
-            printf("%u\t%s\t%s\n", appid, type, name);
+            memset(launches, 0, sizeof(launches));
+            walk(&q, next, path, 0, &name, &type);
+            if (!launch_mode) printf("%u\t%s\t%s\n", appid, type, name);
+            else {
+                /* first launch option for Windows (or without an OS restriction) */
+                for (int i = 0; i < MAX_LAUNCH; i++) {
+                    const char *os = launches[i].oslist;
+                    if (!launches[i].exe || !launches[i].exe[0]) continue;
+                    if (os && os[0] && !strstr(os, "windows")) continue;
+                    printf("%u\t%s\n", appid, launches[i].exe);
+                    break;
+                }
+            }
         }
         p = next;
     }

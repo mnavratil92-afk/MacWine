@@ -414,8 +414,8 @@ steam_user() { # bottle -> "steamid64<TAB>persona" of the most recent signed-in 
     END { if (!done && first!="") print first }' "$f"
 }
 
-steam_local_tsv() { # bottle -> "appid<TAB>name<TAB>installed(0/1)" for every app manifest in all libraries
-  local sd lib libs f appid name flags
+steam_local_tsv() { # bottle -> "appid<TAB>name<TAB>installed(0/1)<TAB>install folder" for every app manifest
+  local sd lib libs f appid name flags idir
   sd="$(steam_dir "$1")"
   [ -f "$sd/steamapps/libraryfolders.vdf" ] || return 0
   libs="$(awk -F'"' '/"path"/ {print $4}' "$sd/steamapps/libraryfolders.vdf")"
@@ -427,8 +427,9 @@ steam_local_tsv() { # bottle -> "appid<TAB>name<TAB>installed(0/1)" for every ap
       appid="$(awk -F'"' '/^\t"appid"/ {print $4; exit}' "$f")"
       name="$(awk -F'"' '/^\t"name"/ {print $4; exit}' "$f")"
       flags="$(awk -F'"' '/^\t"StateFlags"/ {print $4; exit}' "$f")"
+      idir="$(awk -F'"' '/^\t"installdir"/ {print $4; exit}' "$f")"
       [ "$appid" = 228980 ] && continue   # Steamworks Common Redistributables
-      printf '%s\t%s\t%s\n' "$appid" "$name" "$(( (${flags:-0} & 4) ? 1 : 0 ))"
+      printf '%s\t%s\t%s\t%s\n' "$appid" "$name" "$(( (${flags:-0} & 4) ? 1 : 0 ))" "${idir:+$lib/steamapps/common/$idir}"
     done
   done <<< "$libs"
 }
@@ -476,7 +477,19 @@ steam_library_json() { # bottle
   if [ -n "$(keychain_get steam-apikey)" ] && [ ! -f "$ACCOUNTS/steam/owned.json" ]; then steam_sync_or_die "$1"; fi
   if [ -f "$ACCOUNTS/steam/owned.json" ]; then owned="$(cat "$ACCOUNTS/steam/owned.json")"
   else owned="$(steam_cache_tsv "$1" | "$JQ" -R -s '[split("\n")[] | select(length>0) | split("\t") | {id: .[0], name: .[1]}]')"; fi
-  local_json="$(steam_local_tsv "$1" | "$JQ" -R -s '[split("\n")[] | select(length>0) | split("\t") | {id: .[0], name: .[1], installed: (.[2]=="1")}]')"
+  # Installed games: the game's .exe from Steam's own launch configuration (appinfo.vdf "config/launch")
+  local tsv launch_json tool sd ids
+  tsv="$(steam_local_tsv "$1")"
+  sd="$(steam_dir "$1")"; tool="$TOOLS/steamappinfo"; [ -x "$tool" ] || tool="$SELF_DIR/tools/steamappinfo"
+  ids="$(printf '%s\n' "$tsv" | awk -F'\t' '$3 == 1 {print $1}')"
+  launch_json='{}'
+  if [ -n "$ids" ] && [ -x "$tool" ] && [ -f "$sd/appcache/appinfo.vdf" ]; then
+    # shellcheck disable=SC2086
+    launch_json="$("$tool" -l "$sd/appcache/appinfo.vdf" $ids 2>/dev/null | "$JQ" -R -s 'reduce (split("\n")[] | select(length>0) | split("\t")) as $x ({}; .[$x[0]] = ($x[1] | gsub("\\\\"; "/")))')" || launch_json='{}'
+  fi
+  local_json="$(printf '%s\n' "$tsv" | "$JQ" -R -s --argjson launch "$launch_json" '[split("\n")[] | select(length>0) | split("\t") |
+     {id: .[0], name: .[1], installed: (.[2]=="1"),
+      executable: (if .[2]=="1" and (.[3] // "") != "" and $launch[.[0]] then (.[3] + "/" + $launch[.[0]]) else null end)}]')"
   # Cover art: the Steam client's own cache first (portrait cover, then header), then Steam's CDN
   local lc art_json f id
   lc="$(steam_dir "$1")/appcache/librarycache"
@@ -487,8 +500,8 @@ steam_library_json() { # bottle
     def art(id): ($localart[id] // "https://cdn.cloudflare.steamstatic.com/steam/apps/\(id)/library_600x900.jpg");
     ($local | map({key: .id, value: .}) | from_entries) as $L |
     ($owned | map(.id)) as $O |
-    [ $owned[] | {id, name, installed: ($L[.id].installed // false), bottle: $bottle, executable: null, artworkURL: art(.id), source: "owned"} ]
-    + [ $local[] | select(.id as $i | $O | index($i) | not) | {id, name, installed, bottle: $bottle, executable: null, artworkURL: art(.id), source: "local"} ]
+    [ $owned[] | {id, name, installed: ($L[.id].installed // false), bottle: $bottle, executable: ($L[.id].executable // null), artworkURL: art(.id), source: "owned"} ]
+    + [ $local[] | select(.id as $i | $O | index($i) | not) | {id, name, installed, bottle: $bottle, executable, artworkURL: art(.id), source: "local"} ]
     | sort_by(.name | ascii_downcase)'
 }
 
