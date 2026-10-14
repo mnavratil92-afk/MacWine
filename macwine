@@ -1018,6 +1018,8 @@ case "$cmd" in
         wd="$(printf '%s' "$task" | "$JQ" -r '.workingDir // empty' | tr '\\' '/')"
         [ -n "$wd" ] && wd="$gdir/$wd" || wd="$(dirname "$exe")"
         [ -f "$exe" ] || die "the game's program was not found: $exe"
+        # Oblivion with xOBSE (script extender) installed: start through its loader so OBSE plugins load
+        if [ -f "$gdir/obse_loader.exe" ]; then exe="$gdir/obse_loader.exe"; task='{}'; wd="$gdir"; fi
         cd "$wd"
         # shellcheck disable=SC2046
         set -- "$WINE" "$exe" $(printf '%s' "$task" | "$JQ" -r '.arguments // empty')
