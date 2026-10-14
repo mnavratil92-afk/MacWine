@@ -27,6 +27,7 @@
 #   macwine components list|install <bottle> <id...> Windows components (.NET, Visual C++, DirectX...)
 #   macwine dsoal <bottle> on|off|status <program.exe> better sound for older DirectSound games (DSOAL)
 #   macwine fpscounter <bottle> on|off|status <program.exe> FPS number in the corner for one game
+#   macwine dx9dxvk <bottle> on|off|status <program.exe> faster DirectX 9 through DXVK for one game
 #   macwine cfg <bottle>                            Wine configuration (winecfg)
 #   macwine kill <bottle>                           stop all processes in a bottle
 #   macwine version [--json]                        component versions
@@ -701,6 +702,31 @@ gog_info_file() { # bottle id -> goggame-<id>.info of the installed game (or emp
   find "$BOTTLES/$1/drive_c" -maxdepth 6 -name "goggame-$2.info" 2>/dev/null | head -1
 }
 
+gog_apply_registry() { # bottle info-file - registry entries from the game's GOG install script
+  # GOG Galaxy runs goggame-<id>.script after installing; gogdl does not. Many games check those entries
+  # (e.g. Oblivion's launcher keeps "Play" disabled without "Installed Path"). Applied once per script
+  # version; written to both the 32- and 64-bit registry views. Needs setup_env (WINE, WINEPREFIX).
+  local info="$2" gdir script marker sum app line root key name data type
+  gdir="$(dirname "$info")"; script="${info%.info}.script"
+  [ -f "$script" ] || return 0
+  marker="$gdir/.macwine-registry"; sum="$(shasum "$script" | cut -c1-40)"
+  [ "$(cat "$marker" 2>/dev/null)" = "$sum" ] && return 0
+  app="$(win_path "$gdir" "$1")"
+  "$JQ" -r --arg app "$app" '.actions[]? | select(.install.action == "setRegistry") | .install.arguments |
+      [.root // "", .subkey // "", .valueName // "", ((.valueData // "") | tostring | gsub("\\{app\\}"; $app)), .valueType // "string"] | join("\u001f")' \
+      "$script" 2>/dev/null |
+  while IFS=$'\x1f' read -r root key name data type; do
+    case "$root" in HKEY_LOCAL_MACHINE) root=HKLM ;; HKEY_CURRENT_USER) root=HKCU ;; *) continue ;; esac
+    case "$data" in *"{"*"}"*) continue ;; esac            # other placeholders: not supported
+    for view in 32 64; do
+      if [ -z "$name" ]; then "$WINE" reg add "$root\\$key" /reg:$view /f >/dev/null 2>&1
+      elif [ "$type" = dword ]; then "$WINE" reg add "$root\\$key" /v "$name" /t REG_DWORD /d "$data" /reg:$view /f >/dev/null 2>&1
+      else "$WINE" reg add "$root\\$key" /v "$name" /d "$data" /reg:$view /f >/dev/null 2>&1; fi
+    done
+  done
+  echo "$sum" > "$marker"
+}
+
 # --- Better sound for older games: DSOAL (DirectSound on OpenAL Soft, LGPL: github.com/kcat/dsoal) ---
 # Wine's DirectSound makes many older games (FlatOut, Medal of Honor: Airborne, ...) sound metallic and choppy
 # under Rosetta. DSOAL replaces DirectSound for one game only: its dsound.dll goes next to the game's .exe and
@@ -984,6 +1010,7 @@ case "$cmd" in
           exec "$@"
         fi
         [ -n "$info" ] || die "this GOG game is not installed in bottle $b"
+        gog_apply_registry "$b" "$info"
         gdir="$(dirname "$info")"
         task="$("$JQ" -c '(.playTasks // []) | (map(select(.isPrimary == true and (.type // "FileTask") == "FileTask")) + map(select((.type // "FileTask") == "FileTask"))) | first // empty' "$info")"
         [ -n "$task" ] || die "this GOG game has no launch task"
@@ -1321,6 +1348,51 @@ EOF
     esac
     if "$WINE" reg query "$key" /v MacWineShowFPS 2>/dev/null | grep -q "0x1"; then st=true; else st=false; fi
     [ "$JSON" = 1 ] && printf '{"fpscounter":%s}\n' "$st" || echo "FPS counter for $name: $([ "$st" = true ] && echo on || echo off)"
+    ;;
+  dx9dxvk)
+    # macwine dx9dxvk <bottle> on|off|status <program.exe> - "Faster DirectX 9": DXVK instead of Wine's Direct3D
+    #   for one game. DXVK's d3d9.dll goes next to the game's .exe (only that .exe loads it), and MoltenVK runs
+    #   with Metal argument buffers for that program only (Compat "Environment" rule, wine-macwine-compat.patch),
+    #   which DXVK's D3D9 shaders need (moltenvk-spirv-cross-alias-sampler.patch).
+    need_bottle "${1:-}"; b="$1"; action="${2:-}"; prog="${3:-}"
+    [ -n "$prog" ] || die "usage: macwine dx9dxvk <bottle> on|off|status <program.exe>"
+    WINEPREFIX="$BOTTLES/$b"; exe="$(unix_path "$prog")"
+    [ -f "$exe" ] || die "program not found: $prog"
+    gdir="$(dirname "$exe")"; name="$(basename "$exe")"
+    okey="HKCU\\Software\\Wine\\AppDefaults\\$name\\DllOverrides"
+    ckey="HKCU\\Software\\MacWine\\Compat\\$name"
+    # Wine passes a Windows environment variable on to the new process's Unix environment (where MoltenVK
+    # reads its settings) only with the "__CX_UNIX_" prefix, which it strips.
+    mvk_env="__CX_UNIX_MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1"
+    setup_env "$b"
+    case "$action" in
+      on)
+        arch="$(pe_arch "$exe")"; [ -n "$arch" ] || die "not a Windows program: $prog"
+        src="${MACWINE_DXVK_DIR:-$RUNTIME/lib/dxvk}/$([ "$arch" = win64 ] && echo x86_64 || echo i386)-windows/d3d9.dll"
+        [ -f "$src" ] || die "DXVK's d3d9.dll is missing in the runtime"
+        if [ -f "$gdir/d3d9.dll" ] && ! cmp -s "$gdir/d3d9.dll" "$src"; then
+          die "the game already ships its own d3d9.dll - not replacing it"
+        fi
+        cp "$src" "$gdir/d3d9.dll"
+        "$WINE" reg add "$okey" /v d3d9 /d native,builtin /f >/dev/null 2>&1 || die "could not write the registry"
+        "$WINE" reg add "$ckey" /v Environment /t REG_MULTI_SZ /d "$mvk_env" /f >/dev/null 2>&1 || die "could not write the registry"
+        bottle_running "$b" || "$WINESERVER" -w
+        ;;
+      off)
+        for d in "${MACWINE_DXVK_DIR:-$RUNTIME/lib/dxvk}"/*-windows/d3d9.dll; do
+          cmp -s "$gdir/d3d9.dll" "$d" 2>/dev/null && rm -f "$gdir/d3d9.dll"   # only DXVK's own copy
+        done
+        "$WINE" reg delete "$okey" /v d3d9 /f >/dev/null 2>&1 || true
+        if "$WINE" reg query "$ckey" /v Environment 2>/dev/null | grep -q "$mvk_env"; then
+          "$WINE" reg delete "$ckey" /v Environment /f >/dev/null 2>&1 || true
+        fi
+        bottle_running "$b" || "$WINESERVER" -w
+        ;;
+      status) ;;
+      *) die "usage: macwine dx9dxvk <bottle> on|off|status <program.exe>" ;;
+    esac
+    if [ -f "$gdir/d3d9.dll" ] && "$WINE" reg query "$okey" /v d3d9 2>/dev/null | grep -q "native,builtin"; then st=true; else st=false; fi
+    [ "$JSON" = 1 ] && printf '{"dx9dxvk":%s}\n' "$st" || echo "Faster DirectX 9 (DXVK) for $name: $([ "$st" = true ] && echo on || echo off)"
     ;;
   components)
     sub="${1:-list}"
