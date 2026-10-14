@@ -119,6 +119,15 @@ final class AppModel: ObservableObject {
                     completeStores.insert(account.store)
                 }
             }
+            // Programs installed into custom bottles (found through the shortcuts their installers created)
+            struct InstalledApp: Decodable { let name: String; let executable: String }
+            for bottle in customBottles {
+                guard let apps = try? await cli.decode([InstalledApp].self, ["apps", bottle.name, "--json"]) else { continue }
+                for app in apps where !merged.contains(where: { $0.bottle == bottle.name && $0.storeID == app.executable }) {
+                    merged.append(Game(bottle: bottle.name, store: .exe, storeID: app.executable, name: app.name,
+                                       installed: true, executable: app.executable))
+                }
+            }
             games = merged.map { game in
                 guard let exe = game.executable, !exe.hasPrefix("/"), let bottle = list.first(where: { $0.name == game.bottle }),
                       let path = LibraryScanner().windowsURL(exe, bottle: URL(fileURLWithPath: bottle.path))?.path else { return game }

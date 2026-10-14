@@ -17,6 +17,7 @@
 #   macwine disconnect <store>                      remove the local link (store account untouched)
 #   macwine set-key steam                           store a Steam Web API key in the Keychain
 #   macwine open <file.exe|.msi> [--bottle <b>]     open a file (Finder double-click)
+#   macwine apps <bottle> [--json]                  programs installed in a bottle (from their shortcuts)
 #   macwine shortcut <bottle> <store> <id> --name <name> [--dest <folder>] [--icon <image|exe>]
 #                                                   create a .app shortcut with the program icon
 #   macwine icon <program.exe> <output.png>         extract the icon from an .exe
@@ -1395,6 +1396,23 @@ EOF
     esac
     if [ -f "$gdir/d3d9.dll" ] && "$WINE" reg query "$okey" /v d3d9 2>/dev/null | grep -q "native,builtin"; then st=true; else st=false; fi
     [ "$JSON" = 1 ] && printf '{"dx9dxvk":%s}\n' "$st" || echo "Faster DirectX 9 (DXVK) for $name: $([ "$st" = true ] && echo on || echo off)"
+    ;;
+  apps)
+    # macwine apps <bottle> [--json] - programs installed in a bottle, from the Windows shortcuts their
+    # installers created (Start Menu and Desktop). Each entry: name, Windows path of the .exe, arguments.
+    need_bottle "${1:-}"; b="$1"; p="$BOTTLES/$b/drive_c"
+    tool="$TOOLS/lnkinfo"; [ -x "$tool" ] || tool="$SELF_DIR/tools/lnkinfo"; [ -x "$tool" ] || die "lnkinfo tool missing"
+    out="$(find "$p/ProgramData/Microsoft/Windows/Start Menu" "$p"/users/*/AppData/Roaming/Microsoft/Windows/"Start Menu" \
+             "$p"/users/*/Desktop -iname '*.lnk' -print0 2>/dev/null | xargs -0 "$tool" 2>/dev/null |
+      "$JQ" -R -s '[split("\n")[] | select(length > 0) | split("\t") |
+          {name: (.[0] | split("/") | last | sub("\\.lnk$"; "")), executable: .[1], arguments: (.[2] // "")} |
+          select(.executable | test("\\.exe$"; "i")) |
+          select(.executable | test("^[A-Za-z]:\\\\windows\\\\"; "i") | not) |
+          select(.name | test("uninstall|odinstal|deinstal|setup|readme|help|n[aá]pov[eě]da|manu[aá]l"; "i") | not)]
+        | group_by(.executable | ascii_downcase) | map(min_by(.name | length))
+        | sort_by(.name | ascii_downcase)')"
+    if [ "$JSON" = 1 ]; then printf '%s\n' "$out"
+    else printf '%s' "$out" | "$JQ" -r '.[] | "\(.name)  ->  \(.executable)"'; fi
     ;;
   components)
     sub="${1:-list}"

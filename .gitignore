@@ -10,3 +10,4 @@ tools/ubiconfig
 .collab/
 *.log
 .DS_Store
+tools/lnkinfo
