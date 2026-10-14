@@ -1,0 +1,20 @@
+--- a/External/SPIRV-Cross/spirv_msl.cpp	2026-10-13 19:45:15
++++ b/External/SPIRV-Cross/spirv_msl.cpp	2026-10-13 19:45:15
+@@ -19171,6 +19171,17 @@
+ 		// Lower to temporary, so drop the qualification.
+ 		set_qualified_name(aliased_var.self, "");
+ 		statement(descriptor_storage, " auto &", to_name(aliased_var.self), " = ", name);
++
++		// MacWine: a combined image-sampler alias also needs its sampler. The sampler member is synthesized
++		// separately and was never declared for the alias, leaving "<name>Smplr" undeclared (DXVK's D3D9
++		// shaders alias a normal and a depth-compare sampler on the same binding).
++		auto &base_data_type = get_variable_data_type(base_var);
++		if (data_type.basetype == SPIRType::SampledImage && base_data_type.basetype == SPIRType::SampledImage &&
++		    !find_constexpr_sampler(aliased_var.self) && !find_constexpr_sampler(base_var.self))
++		{
++			statement(descriptor_storage, " auto &", to_sampler_expression(aliased_var.self), " = ",
++			          to_sampler_expression(base_var.self), ";");
++		}
+ 	}
+ 	else
+ 	{

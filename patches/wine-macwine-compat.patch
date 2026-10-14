@@ -1,5 +1,5 @@
---- a/dlls/kernelbase/process.c
-+++ b/dlls/kernelbase/process.c
+--- a/dlls/kernelbase/process.c	2026-10-13 19:37:36
++++ b/dlls/kernelbase/process.c	2026-10-13 19:37:57
 @@ -26,6 +26,7 @@
  #include "windef.h"
  #include "winbase.h"
@@ -8,16 +8,16 @@
  #include "wincontypes.h"
  #include "winternl.h"
  
-@@ -499,7 +500,49 @@
-     RtlFreeUnicodeString( &titleW );
+@@ -500,6 +501,114 @@
      return ret;
  }
-+
-+/* MacWine: pravidla kompatibility (parametry prikazove radky pro konkretni programy).
-+ * HKCU\Software\MacWine\Compat\<jmeno.exe>
-+ *   AppendArgs   (REG_SZ) parametry pridane na konec prikazove radky
-+ *   ForbiddenArg (REG_SZ) kdyz je v prikazove radce, pravidlo se nepouzije
-+ * Vraci novou prikazovou radku (alokovanou na halde) nebo NULL. */
+ 
++/* MacWine: compatibility rules for specific programs.
++ * HKCU\Software\MacWine\Compat\<name.exe>
++ *   AppendArgs   (REG_SZ)       arguments appended to the command line
++ *   ForbiddenArg (REG_SZ)       if present in the command line, AppendArgs is not applied
++ *   Environment  (REG_MULTI_SZ) NAME=VALUE entries added to the program's environment
++ * Returns a new command line (allocated on the process heap) or NULL. */
 +static WCHAR *macwine_compat_cmdline( const WCHAR *app_name, const WCHAR *cmdline )
 +{
 +    WCHAR key[MAX_PATH + 40], append[1024], forbidden[256];
@@ -25,7 +25,7 @@
 +    DWORD size;
 +    WCHAR *ret;
 +    HKEY hkey;
- 
++
 +    if (!app_name || !cmdline) return NULL;
 +    for (base = p = app_name; *p; p++) if (*p == '\\' || *p == '/') base = p + 1;
 +    if (lstrlenW( base ) >= MAX_PATH) return NULL;
@@ -55,16 +55,81 @@
 +    return ret;
 +}
 +
++/* MacWine: the "Environment" compat value. Builds a new Unicode environment block from the one the
++ * caller passed (or the current one) plus the program's NAME=VALUE entries, which replace variables
++ * of the same name. Wine turns it into the new process's Unix environment as well, so it also reaches
++ * Unix libraries such as MoltenVK - even when a launcher (e.g. Steam) starts the game.
++ * Returns the block (process heap) or NULL when there is nothing to add. */
++static WCHAR *macwine_compat_environment( const WCHAR *app_name, void *env, DWORD flags )
++{
++    WCHAR key[MAX_PATH + 40], extra[2048];
++    const WCHAR *base, *p, *src, *e, *x;
++    WCHAR *cur = NULL, *ret, *dst;
++    DWORD size = sizeof(extra) - 2 * sizeof(WCHAR), type;
++    SIZE_T len_src, len_extra;
++    HKEY hkey;
++
++    if (!app_name) return NULL;
++    if (env && !(flags & CREATE_UNICODE_ENVIRONMENT)) return NULL; /* leave ANSI blocks alone */
++    for (base = p = app_name; *p; p++) if (*p == '\\' || *p == '/') base = p + 1;
++    if (lstrlenW( base ) >= MAX_PATH) return NULL;
++    swprintf( key, ARRAY_SIZE(key), L"Software\\MacWine\\Compat\\%s", base );
++    if (RegOpenKeyExW( HKEY_CURRENT_USER, key, 0, KEY_READ, &hkey )) return NULL;
++    memset( extra, 0, sizeof(extra) );
++    if (RegQueryValueExW( hkey, L"Environment", NULL, &type, (BYTE *)extra, &size ) ||
++        type != REG_MULTI_SZ || !extra[0])
++    {
++        RegCloseKey( hkey );
++        return NULL;
++    }
++    RegCloseKey( hkey );
++
++    if (!(src = env ? env : (cur = GetEnvironmentStringsW()))) return NULL;
++    for (e = src; *e; e += lstrlenW( e ) + 1);
++    len_src = e - src;
++    for (e = extra; *e; e += lstrlenW( e ) + 1);
++    len_extra = e - extra;
++
++    if (!(ret = RtlAllocateHeap( GetProcessHeap(), 0, (len_src + len_extra + 1) * sizeof(WCHAR) )))
++    {
++        if (cur) FreeEnvironmentStringsW( cur );
++        return NULL;
++    }
++    dst = ret;
++    for (e = src; *e; e += lstrlenW( e ) + 1)
++    {
++        const WCHAR *eq = wcschr( e + 1, '=' ); /* names of hidden variables start with '=' */
++        SIZE_T name_len = eq ? eq - e : lstrlenW( e );
++        BOOL replaced = FALSE;
++
++        for (x = extra; *x; x += lstrlenW( x ) + 1)
++            if (!wcsnicmp( x, e, name_len ) && x[name_len] == '=') { replaced = TRUE; break; }
++        if (replaced) continue;
++        lstrcpyW( dst, e );
++        dst += lstrlenW( e ) + 1;
++    }
++    for (x = extra; *x; x += lstrlenW( x ) + 1)
++    {
++        if (!wcschr( x, '=' )) continue;
++        lstrcpyW( dst, x );
++        dst += lstrlenW( x ) + 1;
++    }
++    *dst = 0;
++    if (cur) FreeEnvironmentStringsW( cur );
++    TRACE( "MacWine compat: environment for %s extended\n", debugstr_w(base) );
++    return ret;
++}
++
  /**********************************************************************
   *           CreateProcessInternalW   (kernelbase.@)
   */
-@@ -585,6 +628,16 @@
- 
+@@ -586,8 +695,24 @@
      info->hThread = info->hProcess = 0;
      info->dwProcessId = info->dwThreadId = 0;
-+
-+    /* MacWine: pravidla kompatibility */
-+    {
+ 
+-    if (!(params = create_process_params( app_name, tidy_cmdline, cur_dir, env, flags, startup_info )))
++    /* MacWine: compatibility rules */
+     {
 +        WCHAR *compat_cmdline = macwine_compat_cmdline( app_name, tidy_cmdline );
 +        if (compat_cmdline)
 +        {
@@ -72,6 +137,15 @@
 +            tidy_cmdline = compat_cmdline;
 +        }
 +    }
- 
-     if (!(params = create_process_params( app_name, tidy_cmdline, cur_dir, env, flags, startup_info )))
-     {
++    {
++        WCHAR *compat_env = macwine_compat_environment( app_name, env, flags );
++
++        params = create_process_params( app_name, tidy_cmdline, cur_dir, compat_env ? compat_env : env,
++                                        compat_env ? flags | CREATE_UNICODE_ENVIRONMENT : flags, startup_info );
++        if (compat_env) RtlFreeHeap( GetProcessHeap(), 0, compat_env );
++    }
++    if (!params)
++    {
+         status = STATUS_NO_MEMORY;
+         goto done;
+     }

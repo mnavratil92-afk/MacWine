@@ -23,6 +23,14 @@ if [ ! -f "$SPVC/spirv_parser.cpp" ]; then
   mkdir -p "$SPVC"
   tar xzf "$BUILD/wine-sources-26.3.0.tar.gz" -C "$SPVC" --strip-components=4 sources/moltenvk/External/SPIRV-Cross
 fi
+# MacWine's SPIRV-Cross fix (aliased combined image-samplers, needed by DXVK's D3D9 shaders). A newly
+# applied patch means the SPIRV-Cross libraries must be rebuilt.
+SPVC_PATCH="$(cd "$(dirname "$0")" && pwd)/patches/moltenvk-spirv-cross-alias-sampler.patch"
+if [ ! -f "$SPVC/.macwine-alias-sampler" ]; then
+  patch -d "$SPVC" -p3 -N < "$SPVC_PATCH"
+  touch "$SPVC/.macwine-alias-sampler"
+  rm -f "$BUILD/obj/.moltenvk-deps.done"
+fi
 if [ ! -f "$BUILD/obj/.moltenvk-deps.done" ]; then
   ./fetchDependencies --macos --spirv-cross-root "$SPVC"
   touch "$BUILD/obj/.moltenvk-deps.done"

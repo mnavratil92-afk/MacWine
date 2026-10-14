@@ -106,6 +106,7 @@ Each script keeps its state in `$MACWINE_BUILD/obj`; use a fresh build folder fo
 - `wine-macwine-username.patch` – the Windows user is always called `macwine`, so bottles can move between Macs.
 - `wine-macwine-wined3d.patch` – FPS limit and an optional FPS counter for games that use Wine's own Direct3D (DirectX 9 and older).
 - `moltenvk-defaults.patch` – MoltenVK defaults tuned for games under Wine.
+- `moltenvk-spirv-cross-alias-sampler.patch` – SPIRV-Cross fix for aliased combined image-samplers (DXVK Direct3D 9 shaders).
 - `dxvk-mingw14.patch` – builds DXVK with the mingw-w64 toolchain above.
 
 Releases: `MACWINE_RELEASE_REPO=<owner>/<repo> ./release.sh <version>` builds the app, the runtime archive and a signed Sparkle appcast.
