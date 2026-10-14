@@ -12,7 +12,7 @@ MacWine is a free, open-source macOS app built on [Wine](https://www.winehq.org)
 
 [![GTA V Legacy on an M1 Pro – 30-second video](docs/screenshots/gta-v-poster.jpg)](docs/screenshots/gta-v.mp4)
 
-*GTA V Legacy on a MacBook Pro M1 Pro at 60 FPS (Steam, DirectX 11 through DXVK). Click the image for the 30-second video.*
+*GTA V Legacy on a MacBook Pro M1 Pro at 60 FPS (Steam, DirectX 11 through DXVK). Click the image to download the 30-second video (MP4).*
 
 | | |
 | --- | --- |
