@@ -17,6 +17,7 @@
 #   macwine disconnect <store>                      remove the local link (store account untouched)
 #   macwine set-key steam                           store a Steam Web API key in the Keychain
 #   macwine open <file.exe|.msi> [--bottle <b>]     open a file (Finder double-click)
+#   macwine uninstall <bottle> <store> <id>         removes an installed game (files go to the Trash)
 #   macwine apps <bottle> [--json]                  programs installed in a bottle (from their shortcuts)
 #   macwine shortcut <bottle> <store> <id> --name <name> [--dest <folder>] [--icon <image|exe>]
 #                                                   create a .app shortcut with the program icon
@@ -1396,6 +1397,85 @@ EOF
     esac
     if [ -f "$gdir/d3d9.dll" ] && "$WINE" reg query "$okey" /v d3d9 2>/dev/null | grep -q "native,builtin"; then st=true; else st=false; fi
     [ "$JSON" = 1 ] && printf '{"dx9dxvk":%s}\n' "$st" || echo "Faster DirectX 9 (DXVK) for $name: $([ "$st" = true ] && echo on || echo off)"
+    ;;
+  uninstall)
+    # macwine uninstall <bottle> <store> <id> - removes an installed game or program. Store games: their files go
+    # to the macOS Trash (saves in the Windows user folders stay). Programs in custom bottles (store "exe", id =
+    # Windows path of the .exe): runs the program's own uninstaller, or Wine's program list when none is found.
+    need_bottle "${1:-}"; setup_env "$1"; b="$1"; store="${2:-}"; id="${3:-}"
+    [ -n "$store" ] && [ -n "$id" ] || die "usage: macwine uninstall <bottle> <store> <id>"
+    removed=()
+    case "$store" in
+      steam)
+        line="$(steam_local_tsv "$b" | awk -F'\t' -v id="$id" '$1 == id' | head -1)"
+        [ -n "$line" ] || die "this Steam game is not installed in bottle $b"
+        gdir="$(printf '%s' "$line" | cut -f4)"
+        if bottle_running "$b"; then
+          # Steam keeps its install list in memory and would write the manifest back: quit it first
+          "$WINE" "$(store_exe steam)" -shutdown >/dev/null 2>&1 &
+          for _ in $(seq 1 30); do bottle_running "$b" || break; sleep 1; done
+          bottle_running "$b" && die "close the game and Steam first"
+        fi
+        lib="${gdir%/common/*}"
+        [ -d "$gdir" ] && removed+=("$gdir")
+        removed+=("$lib/appmanifest_$id.acf")
+        [ -d "$lib/shadercache/$id" ] && removed+=("$lib/shadercache/$id")
+        ;;
+      gog)
+        info="$(gog_info_file "$b" "$id")"
+        [ -n "$info" ] || die "this GOG game is not installed in bottle $b"
+        bottle_running "$b" && die "close the game first"
+        removed+=("$(dirname "$info")")
+        [ -d "$WINEPREFIX/drive_c/GOG Games/.support/$id" ] && removed+=("$WINEPREFIX/drive_c/GOG Games/.support/$id")
+        ;;
+      epic)
+        leg="$(legendary_bin)"
+        gdir="$("$leg" list-installed --json 2>/dev/null | "$JQ" -r --arg id "$id" '.[] | select(.app_name == $id) | .install_path' | head -1)"
+        [ -n "$gdir" ] || die "this Epic game was not installed by MacWine; uninstall it in the Epic Games Launcher"
+        bottle_running "$b" && die "close the game first"
+        "$leg" -y uninstall "$id" --keep-files --skip-uninstaller >/dev/null 2>&1 || die "Legendary could not uninstall $id"
+        [ -d "$gdir" ] && removed+=("$gdir")
+        ;;
+      exe)
+        # Uninstall entry whose folder (InstallLocation, else the folder of DisplayIcon / the uninstaller)
+        # contains the program; the longest match wins.
+        exedir="$(printf '%s' "${id%\\*}" | tr 'A-Z' 'a-z')"
+        key="$(EXEDIR="$exedir" awk '
+          BEGIN { exedir = ENVIRON["EXEDIR"] }   # not -v: awk would expand the backslashes
+          function val(s) { sub(/^"[^"]*"=(str\([0-9]\):)?"/, "", s); sub(/"$/, "", s); gsub(/\\\\/, "\\", s); gsub(/\\"/, "\"", s); return s }
+          function dirof(s) { if (s ~ /^"/) { s = substr(s, 2); sub(/".*/, "", s) } else if (match(tolower(s), /\.exe/)) s = substr(s, 1, RSTART + 3); sub(/\\[^\\]*$/, "", s); return s }
+          function done() {
+            if (k == "") return
+            loc = inst != "" ? inst : (icon != "" ? dirof(icon) : dirof(unst)); loc = tolower(loc); sub(/\\+$/, "", loc)
+            if (loc ~ /^[a-z]:\\./ && loc !~ /^[a-z]:\\(windows|program files( \(x86\))?)$/ && \
+                (exedir == loc || index(exedir, loc "\\") == 1) && length(loc) > best) { best = length(loc); bestkey = k }
+          }
+          /^\[/ { done(); k = ""; inst = icon = unst = ""
+                  if (match($0, /^\[Software\\\\(Wow6432Node\\\\)?Microsoft\\\\Windows\\\\CurrentVersion\\\\Uninstall\\\\/)) {
+                    k = substr($0, RLENGTH + 1); sub(/\] [0-9]+$/, "", k); gsub(/\\\\/, "\\", k) }
+                  next }
+          k != "" && /^"InstallLocation"=/ { inst = val($0) }
+          k != "" && /^"DisplayIcon"=/ { icon = val($0); sub(/,-?[0-9]+$/, "", icon) }
+          k != "" && /^"UninstallString"=/ { unst = val($0) }
+          END { done(); print bestkey }' "$WINEPREFIX/system.reg")"
+        if [ -n "$key" ]; then set -- uninstaller --remove "$key"; mode=uninstaller
+        else set -- uninstaller; mode=list; fi
+        [ "$JSON" = 1 ] && "$JQ" -n --arg m "$mode" --arg k "$key" '{mode: $m, key: $k}'
+        [ "$JSON" = 1 ] || { [ -n "$key" ] && echo "Running the uninstaller of: $key" || echo "No uninstaller found; opening Wine's program list"; }
+        nohup "$WINE" "$@" >/dev/null 2>&1 & disown || true
+        exit 0 ;;
+      *) die "uninstalling is not supported for $store games" ;;
+    esac
+    # Files go to the Trash (a folder per uninstall, so nothing is overwritten)
+    trash="$HOME/.Trash/MacWine - $(date +%Y-%m-%d\ %H.%M.%S) - $store $id"
+    mkdir -p "$trash"
+    for p in "${removed[@]}"; do [ -e "$p" ] && mv "$p" "$trash/" ; done
+    # Mac shortcuts that start this game
+    q="launch $(printf '%q %q %q' "$b" "$store" "$id") --detach"
+    for l in "$HOME/Applications"/*.app/Contents/MacOS/launcher "$HOME/Desktop"/*.app/Contents/MacOS/launcher; do
+      [ -f "$l" ] && grep -qF "$APP_BUNDLE_ID" "$l" && grep -qF "$q" "$l" && mv "${l%/Contents/MacOS/launcher}" "$trash/"
+    done
+    if [ "$JSON" = 1 ]; then "$JQ" -n --arg t "$trash" '{mode: "removed", trash: $t}'; else echo "Uninstalled; files moved to: $trash"; fi
     ;;
   apps)
     # macwine apps <bottle> [--json] - programs installed in a bottle, from the Windows shortcuts their

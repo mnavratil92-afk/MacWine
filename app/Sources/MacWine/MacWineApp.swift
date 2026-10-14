@@ -138,6 +138,7 @@ struct GameDetailView: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.dismiss) var dismiss
     @State private var rating = false
+    @State private var confirmUninstall = false
     @State private var dsoal: Bool?        // nil = unknown / not applicable
     @State private var dsoalBusy = false
     @State private var dsoalError: String?
@@ -196,6 +197,9 @@ struct GameDetailView: View {
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     if let dsoalError { Text(dsoalError).font(.caption).foregroundStyle(.red) }
                 }
+                if game.installed, game.store != .ubisoft {
+                    Button("Uninstall…", role: .destructive) { confirmUninstall = true }.disabled(model.busy)
+                }
                 Divider()
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Community rating").font(.headline)
@@ -218,6 +222,16 @@ struct GameDetailView: View {
             }
         }.padding(30).frame(width: 600)
         .sheet(isPresented: $rating) { RateGameView(game: game) }
+        .confirmationDialog("Uninstall \(game.name)?", isPresented: $confirmUninstall) {
+            Button("Uninstall", role: .destructive) {
+                dismiss()
+                Task { await model.uninstall(game) }
+            }
+        } message: {
+            Text(game.store == .exe
+                 ? "The program's own uninstaller will open."
+                 : "The game's files are moved to the Trash. Close the game\(game.store == .steam ? " (MacWine also quits Steam)" : "") first.")
+        }
         .task(id: game.id) {
             guard game.installed, let exe = game.executable else { return }
             dsoal = (try? await model.cli.decode(DsoalStatus.self, ["dsoal", game.bottle, "status", exe, "--json"]))?.dsoal

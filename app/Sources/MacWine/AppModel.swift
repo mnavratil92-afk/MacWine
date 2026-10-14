@@ -284,6 +284,11 @@ final class AppModel: ObservableObject {
         try? FileManager.default.removeItem(at: customArtworkURL(game))
         artworkVersion += 1
     }
+    /// Store games: files go to the Trash. Programs in custom bottles: their own uninstaller runs.
+    func uninstall(_ game: Game) async {
+        let message = game.store == .exe ? "Opening the uninstaller…" : "Uninstalling \(game.name)…"
+        await perform(["uninstall", game.bottle, game.store.rawValue, game.storeID], message: message, refreshAfter: true)
+    }
     func shortcut(_ game: Game) {
         let panel = NSOpenPanel(); panel.title = "Save game shortcut"; panel.prompt = "Save Here"
         panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.canCreateDirectories = true
