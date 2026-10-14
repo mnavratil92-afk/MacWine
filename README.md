@@ -6,6 +6,21 @@ MacWine is a free, open-source macOS app built on [Wine](https://www.winehq.org)
 
 > **Status: early preview.** Many games work, many do not. Check the community ratings in the app before you install a large game.
 
+![MacWine library](docs/screenshots/app-library.png)
+
+## Screenshots
+
+[![GTA V Legacy on an M1 Pro – 30-second video](docs/screenshots/gta-v-poster.jpg)](docs/screenshots/gta-v.mp4)
+
+*GTA V Legacy on a MacBook Pro M1 Pro at 60 FPS (Steam, DirectX 11 through DXVK). Click the image for the 30-second video.*
+
+| | |
+| --- | --- |
+| ![GTA V Legacy](docs/screenshots/gta-2.jpg) | ![GTA V Legacy](docs/screenshots/gta-3.jpg) |
+| ![Human Resource Machine](docs/screenshots/hrm-2.jpg) | ![FlatOut](docs/screenshots/flatout.jpg) |
+| *Human Resource Machine (Epic Games)* | *FlatOut (GOG, DirectX 9)* |
+| ![Installed games](docs/screenshots/app-installed.png) | ![GTA V Legacy](docs/screenshots/gta-1.jpg) |
+
 ## Features
 
 - **Your store libraries in one app.** Sign in once and MacWine shows every game you own; games that are not installed yet are shown in gray.
